@@ -100,6 +100,112 @@
     };
   }
 
+  /** Row span of a cell range or whole-row range, using 1-based row numbers. */
+  function rowSpan(ref) {
+    var clean = String(ref || "").replace(/\$/g, "");
+    var m = clean.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+    if (m) {
+      var start = Number(m[2]);
+      var end = Number(m[4] || m[2]);
+      return { start: Math.min(start, end), count: Math.abs(end - start) + 1 };
+    }
+    m = clean.match(/^(\d+)(?::(\d+))?$/);
+    if (m) {
+      var a = Number(m[1]);
+      var b = Number(m[2] || m[1]);
+      return { start: Math.min(a, b), count: Math.abs(b - a) + 1 };
+    }
+    return null;
+  }
+
+  /** Column span of a cell range or whole-column range, using 0-based indexes. */
+  function columnSpan(ref) {
+    var clean = String(ref || "").replace(/\$/g, "");
+    var m = clean.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+    if (m) {
+      var start = columnIndex(m[1]);
+      var end = columnIndex(m[3] || m[1]);
+      return { start: Math.min(start, end), count: Math.abs(end - start) + 1 };
+    }
+    m = clean.match(/^([A-Z]+)(?::([A-Z]+))?$/i);
+    if (m) {
+      var a = columnIndex(m[1]);
+      var b = columnIndex(m[2] || m[1]);
+      return { start: Math.min(a, b), count: Math.abs(b - a) + 1 };
+    }
+    return null;
+  }
+
+  /**
+   * Row/column edits must affect whole rows or columns. A cell-shaped range
+   * such as A5 with count 3 would otherwise insert only cells in column A.
+   * Normalize to an exact axis range and reject ranges/counts that disagree.
+   */
+  function normalizeStructuralOp(o, op) {
+    var isRow = o.op === "insertRows" || o.op === "deleteRows";
+    var label = isRow ? "row" : "column";
+    var hasRange = !!o.range;
+    var hasAt = op.at != null && op.at !== "";
+    if (hasRange && hasAt) {
+      return { error: o.op + " accepts either at + count or a range, not both." };
+    }
+    if (!hasRange && !hasAt) {
+      return { error: o.op + " requires at + count or a range." };
+    }
+
+    var start;
+    var spanCount;
+    if (hasRange) {
+      var span = isRow ? rowSpan(o.range) : columnSpan(o.range);
+      if (!span) {
+        return { error: o.op + " requires a cell range or a whole-" + label + " range; '" + o.range + "' is not one." };
+      }
+      start = span.start;
+      spanCount = span.count;
+    } else if (isRow) {
+      start = Number(op.at);
+      if (!Number.isInteger(start) || start < 1) {
+        return { error: o.op + " requires a positive row number in at." };
+      }
+      spanCount = 1;
+    } else {
+      start = typeof op.at === "string" && /^[A-Z]+$/i.test(op.at)
+        ? columnIndex(op.at)
+        : Number(op.at) - 1;
+      if (!Number.isInteger(start) || start < 0) {
+        return { error: o.op + " requires a valid column letter or number in at." };
+      }
+      spanCount = 1;
+    }
+
+    var requested = op.count != null ? Number(op.count) : null;
+    if (requested != null) {
+      if (!Number.isInteger(requested) || requested < 1) {
+        return { error: o.op + " requires count to be a positive integer." };
+      }
+      // A single cell/row/column plus count means "start here and span count".
+      // A multi-row/column range must agree with count instead of silently
+      // ignoring either value.
+      if (spanCount > 1 && requested !== spanCount) {
+        return { error: o.op + " range spans " + spanCount + " " + label + "(s) but count is " + requested + "; make them agree or omit count." };
+      }
+      spanCount = requested;
+    }
+
+    if (isRow) {
+      return {
+        range: start + ":" + (start + spanCount - 1),
+        count: spanCount,
+        at: start,
+      };
+    }
+    return {
+      range: columnName(start) + ":" + columnName(start + spanCount - 1),
+      count: spanCount,
+      at: columnName(start),
+    };
+  }
+
   /* ------------------------------------------------------------- parsing */
 
   function addressParts(address) {
@@ -234,18 +340,18 @@
     o.rows = Math.max(0, Number(op.rows || 0));
     o.columns = Math.max(0, Number(op.columns || 0));
 
-    // Models often use the friendlier {at,count} form. Convert it into a range
-    // that Office.js can execute and that the review UI can show precisely.
-    if (!o.range && /^(insertRows|deleteRows)$/.test(o.op) && o.at > 0) {
-      o.count = Math.max(1, o.count || 1);
-      o.range = o.at + ":" + (o.at + o.count - 1);
-    }
-    if (!o.range && /^(insertColumns|deleteColumns)$/.test(o.op) && o.at != null) {
-      var startCol = typeof op.at === "string" && /^[A-Z]+$/i.test(op.at)
-        ? columnIndex(op.at)
-        : Math.max(0, Number(op.at) - 1);
-      o.count = Math.max(1, o.count || 1);
-      o.range = columnName(startCol) + ":" + columnName(startCol + o.count - 1);
+    // Row/column edits must be normalized before execution. Cell-shaped ranges
+    // are expanded to whole rows/columns so adjacent data cannot shift apart.
+    if (/^(insertRows|deleteRows|insertColumns|deleteColumns)$/.test(o.op)) {
+      var structural = normalizeStructuralOp(o, op);
+      if (structural.error) {
+        o.ok = false;
+        o.error = structural.error;
+      } else {
+        o.range = structural.range;
+        o.count = structural.count;
+        o.at = structural.at;
+      }
     }
     if (o.op === "renameSheet") o.sheet = o.from || o.sheet;
     if (o.op === "deleteSheet") o.sheet = o.name || o.sheet;
@@ -262,7 +368,7 @@
     var needsRange = ["setValues", "setFormulas", "clearRange", "insertRows", "deleteRows",
       "insertColumns", "deleteColumns", "formatRange", "autofitRange", "mergeRange",
       "unmergeRange", "addTable", "sortRange", "addChart"].indexOf(o.op) >= 0;
-    if (needsRange && (!o.sheet || !o.range)) {
+    if (o.ok && needsRange && (!o.sheet || !o.range)) {
       o.ok = false; o.error = o.op + " requires an exact sheet and range.";
     } else if (o.op === "setValues" && o.values == null) {
       o.ok = false; o.error = "setValues requires values.";
@@ -426,15 +532,12 @@
     var chartType = ChartType[typeName];
     if (!chartType) throw new Error("Unsupported chart type '" + typeName + "' (charts need ExcelApi 1.8+)");
     var source = sheet.getRange(op.source || op.range);
-    var SeriesBy = (typeof Excel !== "undefined" && Excel.ChartSeriesByColumns) || {};
+    var SeriesBy = (typeof Excel !== "undefined" && Excel.ChartSeriesBy) || {};
     var seriesBy = SeriesBy.columns;
-    var chart;
-    try {
-      chart = sheet.charts.add(chartType, seriesBy, source);
-    } catch (err) {
-      // Some builds take the source as the second argument.
-      chart = sheet.charts.add(chartType, source);
-    }
+    // Microsoft documents ChartCollection.add(type, sourceData, seriesBy).
+    // Do not fall back after a deferred sync error: by then the chart may
+    // already exist, and a second add could create a duplicate.
+    var chart = sheet.charts.add(chartType, source, seriesBy);
     if (op.position && chart && typeof chart.setPosition === "function") {
       try {
         if (op.position.startCell) chart.setPosition(op.position.startCell, op.position.endCell || undefined);

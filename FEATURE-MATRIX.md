@@ -10,7 +10,9 @@ conservative: a feature is marked complete only when the add-in has an executabl
 
 - Multi-turn OpenCode sessions with provider/model and Agent selection.
 - Workbook-scoped session persistence for saved files.
-- Bounded cross-sheet context containing values, table names, and live formulas.
+- Bounded cross-sheet context containing values, table names, and live formulas, capped at 30,000
+  characters with per-cell clipping. An independent **Send workbook samples** setting can skip all
+  sheet reads; the selection checkbox controls only the selected cells.
 - `@SheetName` focus, selected-range context, and cell/range citations in prompts.
 - OpenCode Skills/playbooks and visibility into configured MCP/app connections.
 - Web-research prompts through the tools enabled in the OpenCode workspace.

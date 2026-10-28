@@ -134,6 +134,12 @@ workbooks for the rest of the Excel session. To remove the add-in later:
   from every non-empty tab are sent as context. The whole-workbook context means OpenCode can see
   your tabs, tables, and formula logic, not just the selection. Use `@SheetName` to give one tab a
   larger context budget.
+* **Workbook context controls** - **Send workbook samples** in Settings controls the all-sheet
+  samples (names, used ranges, values, formulas). It is on by default; turning it off skips every
+  sheet read and sends no sheet data. The **selection checkbox** only adds or removes the selected
+  cells and does not turn workbook samples off. Both choices are remembered. Workbook and
+  selection context are each capped at 30,000 characters; long cells are clipped and the prompt
+  notes when data was truncated.
 * **Model** - the model selector lists every model your OpenCode app exposes. The choice is remembered
   and applied to the next message; *Default* lets OpenCode pick.
 * **Agentic edits (change plans)** - when you ask OpenCode to change the workbook
@@ -227,7 +233,9 @@ Then pick **excel** under *Agent* in the three-dot settings menu. Config referen
 | Service URL | `OPENCODE_SERVICE_URL` env var, else service registration file | auto-discovered |
 | Service password | `OPENCODE_SERVICE_PASSWORD` env var, else registration/config file | auto-discovered |
 | Allowed browser origin | checked by the bridge | same-origin `localhost` / `127.0.0.1` only |
-| Cells sent per request | Three-dot settings menu, *Max cells sent* | `400` |
+| Selected cells sent per request | Three-dot settings menu, *Max selected cells sent* | `400` |
+| Workbook samples | Three-dot settings menu, *Send workbook samples* | on |
+| Selected cells in prompt | Selection checkbox above the composer | on |
 | Read-only mode | Three-dot settings menu, *Read-only mode* | off |
 | Approval gates | Three-dot settings menu, *Approval gates* | *Ask before every change* |
 | AI model | Composer model selector | OpenCode's session default |
@@ -265,8 +273,10 @@ before `npm run dev`.
 * **Excel on the web** cannot reach `127.0.0.1` (Local Network Access + mixed content block it). Desktop only, unless you expose the bridge through a tunnel.
 * Replies of tables rely on the model returning a ```tsv / ```csv block — the quick actions ask for exactly that.
 * `GET /api/event` in OpenCode v2 is volatile (no replay, may close mid-turn); the bridge reconnects and also polls `session/.../message`, so text and completion survive.
-* Long selections are truncated to the *Max cells sent* setting. Whole-workbook context is also
-  bounded, so use `@SheetName` to give a very large tab a larger sample budget.
+* Long selections are truncated to the *Max selected cells sent* setting, and their values are
+  loaded only after the cap is applied. Workbook and selection context are each bounded at 30,000
+  characters, so use `@SheetName` to give a very large tab a larger sample budget. Turn off
+  **Send workbook samples** to send no sheet data at all.
 * Native attachment understanding depends on the selected provider/model's supported media types.
 
 ## 9. Files

@@ -96,6 +96,36 @@ const rowOp = plan.normalizeOp({ op: "insertRows", sheet: "Plan", at: 5, count: 
 check("row operation expands at/count", rowOp.range, "5:7");
 const colOp = plan.normalizeOp({ op: "deleteColumns", sheet: "Plan", at: "C", count: 2 });
 check("column operation expands at/count", colOp.range, "C:D");
+
+// The model prompt uses a cell-shaped range with count. It must still affect
+// whole rows/columns, otherwise only one column/row shifts.
+const promptRowOp = plan.normalizeOp({ op: "insertRows", sheet: "Sheet1", range: "A5", count: 3 });
+check("prompt row example is valid", promptRowOp.ok, true);
+check("prompt row example becomes whole rows", promptRowOp.range, "5:7");
+check("prompt row example keeps count", promptRowOp.count, 3);
+check("prompt row example names whole rows in the preview", promptRowOp.address, "Sheet1!5:7");
+const promptColOp = plan.normalizeOp({ op: "insertColumns", sheet: "Sheet1", range: "A5", count: 3 });
+check("cell-shaped column edit becomes whole columns", promptColOp.range, "A:C");
+check("cell-shaped column edit names whole columns", promptColOp.address, "Sheet1!A:C");
+const spannedRows = plan.normalizeOp({ op: "deleteRows", sheet: "Sheet1", range: "A5:C7" });
+check("multi-row range becomes whole rows", spannedRows.range, "5:7");
+check("multi-row range keeps its span", spannedRows.count, 3);
+const spannedCols = plan.normalizeOp({ op: "deleteColumns", sheet: "Sheet1", range: "B2:D9" });
+check("multi-column range becomes whole columns", spannedCols.range, "B:D");
+const wholeRows = plan.normalizeOp({ op: "insertRows", sheet: "Sheet1", range: "5:7", count: 3 });
+check("whole-row range with matching count is accepted", wholeRows.range, "5:7");
+const conflictingRows = plan.normalizeOp({ op: "insertRows", sheet: "Sheet1", range: "A5:C7", count: 2 });
+check("conflicting row span and count is rejected", conflictingRows.ok, false);
+check("conflicting row error explains the mismatch", /spans 3 row/.test(conflictingRows.error || ""), true);
+const conflictingCols = plan.normalizeOp({ op: "deleteColumns", sheet: "Sheet1", range: "C3:E9", count: 2 });
+check("conflicting column span and count is rejected", conflictingCols.ok, false);
+const bothForms = plan.normalizeOp({ op: "insertRows", sheet: "Sheet1", at: 5, range: "A5", count: 3 });
+check("at plus range is rejected", bothForms.ok, false);
+const namedRows = plan.normalizeOp({ op: "insertRows", sheet: "Sheet1", range: "MyRows" });
+check("named row range is rejected", namedRows.ok, false);
+const zeroCount = plan.normalizeOp({ op: "insertRows", sheet: "Sheet1", at: 5, count: 0 });
+check("zero count is rejected", zeroCount.ok, false);
+check("zero count error explains the requirement", /positive integer/.test(zeroCount.error || ""), true);
 const r1c1 = plan.normalizeOp({ op: "setFormulas", sheet: "Plan", range: "E2:E10", formulaR1C1: "=RC[-2]*RC[-1]" });
 check("multi-cell R1C1 plan is valid", r1c1.ok, true);
 check("plan estimates affected cells", r1c1.cellCount, 9);
@@ -355,6 +385,67 @@ check(
   formulaAssignments.filter(function (item) { return item[0] === "range"; }).length,
   0
 );
+
+// --- row/column executor uses the normalized whole-axis ranges -------------
+var structuralCalls = [];
+var structuralSheet = {
+  getRange: function (address) {
+    return {
+      insert: function (shift) { structuralCalls.push(["insert", address, shift]); },
+      delete: function (shift) { structuralCalls.push(["delete", address, shift]); },
+    };
+  },
+};
+var structuralExcel = {
+  run: async function (fn) {
+    return fn({
+      workbook: {
+        worksheets: {
+          getActiveWorksheet: function () { return structuralSheet; },
+          getItem: function () { return structuralSheet; },
+        },
+      },
+      sync: async function () {},
+    });
+  },
+  InsertShift: { down: "down", right: "right" },
+  DeleteShiftDirection: { up: "up", left: "left" },
+};
+const rowApply = plan.normalizeOp({ op: "insertRows", sheet: "Sheet1", range: "A5", count: 3 });
+await plan.applyOps(structuralExcel, [rowApply]);
+check("row executor targets whole rows", structuralCalls[0], ["insert", "5:7", "down"]);
+const colApply = plan.normalizeOp({ op: "deleteColumns", sheet: "Sheet1", range: "C3", count: 2 });
+await plan.applyOps(structuralExcel, [colApply]);
+check("column executor targets whole columns", structuralCalls[1], ["delete", "C:D", "left"]);
+
+// --- chart creation uses the documented Office.js argument order ------------
+var chartCalls = [];
+var chartSheet = {
+  getRange: function (address) { return { address: address }; },
+  charts: {
+    add: function (chartType, source, seriesBy) {
+      chartCalls.push([chartType, source && source.address, seriesBy]);
+      return { name: "", setPosition: function () {} };
+    },
+  },
+};
+var chartExcel = {
+  run: async function (fn) {
+    return fn({
+      workbook: { worksheets: { getActiveWorksheet: function () { return chartSheet; }, getItem: function () { return chartSheet; } } },
+      sync: async function () { throw new Error("chart add failed at sync"); },
+    });
+  },
+};
+var realExcel = globalThis.Excel;
+globalThis.Excel = { ChartType: { ColumnClustered: "ColumnClustered" }, ChartSeriesBy: { columns: "Columns" } };
+const chartOp = plan.normalizeOp({ op: "addChart", sheet: "Sheet1", chartType: "ColumnClustered", source: "A1:B5", name: "Chart 1" });
+const chartResults = await plan.applyOps(chartExcel, [chartOp]);
+globalThis.Excel = realExcel;
+check("chart add uses the documented argument order", chartCalls[0], ["ColumnClustered", "A1:B5", "Columns"]);
+check("chart add is attempted once (no fallback after deferred errors)", chartCalls.length, 1);
+check("deferred chart error is reported as a failed operation", chartResults[0].ok, false);
+check("deferred chart error keeps the host error", /chart add failed at sync/.test(chartResults[0].error || ""), true);
 
 // --- sheet formatter helpers ------------------------------------------------
 check(

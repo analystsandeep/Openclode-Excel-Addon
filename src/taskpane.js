@@ -41,12 +41,15 @@
     attachments: [],      /* { id, uploadID, uri, name, type, size, text } */
     mentionedSheets: [],  /* @SheetName focus from the last prompt */
     wantsPlan: false,     /* nudge the model toward a plan this turn */
+    contextReadToken: 0,  /* discard stale workbook-context reads */
   };
 
   var MODEL_KEY = "opencode.excel.model";
   var SESSION_KEY = "opencode.excel.session";
   var READONLY_KEY = "opencode.excel.readonly";
   var APPROVAL_KEY = "opencode.excel.approval";
+  var INCLUDE_SELECTION_KEY = "opencode.excel.includeSelection";
+  var INCLUDE_WORKBOOK_KEY = "opencode.excel.includeWorkbook";
 
   var MAX_ATTACHMENTS = 20;
   var MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -54,6 +57,9 @@
   var WORKBOOK_ROW_CAP = 200;
   var WORKBOOK_COL_CAP = 60;
   var CONTEXT_CHAR_BUDGET = 30000;
+  var CONTEXT_CELL_CHARS = 500;
+  var CONTEXT_FORMULA_CHARS = 1000;
+  var CONTEXT_TRUNCATION_NOTE = "... (workbook context truncated at 30,000 characters)";
 
   var PLAN_HINT =
     "If this task changes the workbook, reply with a JSON plan only (a ```json fence) using the schema in the " +
@@ -664,10 +670,84 @@
     if (!state.undoStack.length) hideUndoRow();
   }
 
+  /* ------------------------------------------------------- context budget -- */
+
+  function contextText(value, limit) {
+    var text = value == null ? "" : String(value);
+    text = text.replace(/[\t\n\r]+/g, " ");
+    if (text.length > limit) text = text.slice(0, limit) + " [truncated]";
+    return text;
+  }
+
+  function createContextBudget(limit) {
+    // The truncation marker is reserved up front so the note itself always
+    // fits even when the context is cut to exactly the budget.
+    var reserve = CONTEXT_TRUNCATION_NOTE.length + 1;
+    return {
+      remaining: Math.max(0, limit - reserve),
+      truncated: false,
+      canTake: function (text, separator) {
+        var sep = separator || "";
+        return this.remaining >= sep.length + text.length;
+      },
+      take: function (text, separator) {
+        var sep = separator || "";
+        if (this.canTake(text, sep)) {
+          this.remaining -= sep.length + text.length;
+          return text;
+        }
+        this.truncated = true;
+        var room = this.remaining - sep.length;
+        if (room <= 0) return null;
+        this.remaining = 0;
+        return text.slice(0, room);
+      },
+    };
+  }
+
+  function contextTsvOf(values, budget, out) {
+    out = out || [];
+    for (var r = 0; r < (values || []).length; r++) {
+      var line = ((values[r] || [])).map(function (cell) { return contextText(cell, CONTEXT_CELL_CHARS); }).join("\t");
+      var taken = budget.take(line, out.length ? "\n" : "");
+      if (taken == null) break;
+      out.push(taken);
+      if (taken.length < line.length) break;
+    }
+    return out;
+  }
+
+  function contextFormulaLines(formulas, budget, startCol, startRow) {
+    var out = [];
+    for (var fr = 0; fr < (formulas || []).length; fr++) {
+      var rowFormulas = formulas[fr] || [];
+      for (var fc = 0; fc < rowFormulas.length; fc++) {
+        var formulaValue = rowFormulas[fc];
+        if (typeof formulaValue !== "string" || formulaValue.charAt(0) !== "=") continue;
+        var text = colName(startCol + fc) + (startRow + fr) + "=" + contextText(formulaValue, CONTEXT_FORMULA_CHARS);
+        var sep = out.length ? "\n" : "";
+        if (!budget.canTake(text, sep)) {
+          budget.truncated = true;
+          return out;
+        }
+        budget.take(text, sep);
+        out.push(text);
+        if (out.length >= 250) return out;
+      }
+    }
+    return out;
+  }
+
   /* ------------------------------------------------------------ excel glue */
 
   function inExcel() {
     return typeof Excel !== "undefined";
+  }
+
+  function contextOption(id, fallback) {
+    var el = typeof document !== "undefined" ? document.getElementById(id) : null;
+    if (!el) return fallback;
+    return !!el.checked;
   }
 
   function sessionStorageKey() {
@@ -700,64 +780,82 @@
       return;
     }
     try {
-      state.context = await Excel.run(async function (ctx) {
+      var contextToken = ++state.contextReadToken;
+      var next = await Excel.run(async function (ctx) {
         var range = ctx.workbook.getSelectedRange();
-        range.load(["address", "values", "formulas", "rowCount", "columnCount"]);
+        var includeWorkbook = contextOption("includeWorkbook", true);
+        var includeSelection = contextOption("includeSelection", true);
+        // Read the dimensions first, then load values and formulas only for a
+        // bounded sample of the selection. A huge selection never reaches the
+        // values/formulas pipeline before the cap is applied.
+        range.load(["address", "rowCount", "columnCount"]);
         var active = ctx.workbook.worksheets.getActiveWorksheet();
         active.load("name");
         var sheets = ctx.workbook.worksheets;
-        sheets.load("items/name");
+        if (includeWorkbook) sheets.load("items/name");
         await ctx.sync();
 
-        var maxCells = Number($("maxCells").value || 400);
-        var values = range.values || [];
-        var total = range.rowCount * range.columnCount;
-        var truncated = total > maxCells;
-        var maxRows = Math.max(1, Math.floor(maxCells / Math.max(1, range.columnCount)));
-        var slice = values.slice(0, maxRows);
-        var tsv = slice
-          .map(function (row) {
-            return row
-              .map(function (cell) {
-                var value = cell === null || cell === undefined ? "" : String(cell);
-                return value.replace(/[\t\n\r]/g, " ");
-              })
-              .join("\t");
-          })
-          .join("\n");
-
-        var formula = null;
-        if (range.rowCount === 1 && range.columnCount === 1) {
-          formula = range.formulas && range.formulas[0] && range.formulas[0][0];
-        }
-        if (formula && String(formula).indexOf("=") !== 0) formula = null;
-
+        var dims = {
+          rows: Math.max(1, Number(range.rowCount || 1)),
+          columns: Math.max(1, Number(range.columnCount || 1)),
+        };
         var c = {
           address: range.address,
           sheet: active.name || "",
-          rowCount: range.rowCount,
-          columnCount: range.columnCount,
-          truncated: truncated,
-          tsv: tsv,
-          formula: formula,
-          sheets: (sheets.items || []).map(function (s) { return { name: s.name }; }),
-          sheetDetails: []
+          rowCount: dims.rows,
+          columnCount: dims.columns,
+          truncated: false,
+          charTruncated: false,
+          tsv: "",
+          formula: null,
+          sheets: [],
+          sheetDetails: [],
+          contextTruncated: false
         };
+        if (includeSelection) {
+          var maxCells = Number($("maxCells").value || 400);
+          if (!Number.isFinite(maxCells) || maxCells < 1) maxCells = 400;
+          maxCells = Math.min(5000, Math.floor(maxCells));
+          var sampleRows = dims.rows;
+          var sampleCols = dims.columns;
+          if (dims.rows * dims.columns > maxCells) {
+            sampleRows = Math.max(1, Math.floor(maxCells / dims.columns));
+            sampleRows = Math.min(sampleRows, dims.rows);
+            sampleCols = Math.max(1, Math.floor(maxCells / Math.max(1, sampleRows)));
+            sampleCols = Math.min(sampleCols, dims.columns);
+          }
+          var sample = range.getAbsoluteResizedRange(sampleRows, sampleCols);
+          sample.load(["values", "formulas"]);
+          await ctx.sync();
+          c.truncated = dims.rows * dims.columns > maxCells;
+          var selBudget = createContextBudget(CONTEXT_CHAR_BUDGET);
+          var selLines = contextTsvOf(sample.values || [], selBudget, []);
+          c.tsv = selLines.join("\n");
+          c.charTruncated = selBudget.truncated;
+          if (dims.rows === 1 && dims.columns === 1) {
+            var f = sample.formulas && sample.formulas[0] && sample.formulas[0][0];
+            if (f && String(f).indexOf("=") === 0) c.formula = f;
+          }
+        }
+        if (includeWorkbook) {
+          c.sheets = (sheets.items || []).map(function (s) { return { name: s.name }; });
+        }
 
         /* Per-sheet dimensions, tables and (bounded) values. */
         var details = [];
-        (c.sheets || []).forEach(function (sinfo) {
-          var ws = ctx.workbook.worksheets.getItem(sinfo.name);
-          var used = typeof ws.getUsedRangeOrNullObject === "function" ? ws.getUsedRangeOrNullObject() : ws.getUsedRange();
-          used.load(["address", "rowCount", "columnCount", "rowIndex", "columnIndex", "isNullObject"]);
-          var tables = ws.tables;
-          tables.load("items/name");
-          details.push({ ws: ws, used: used, tables: tables, name: sinfo.name, info: null });
-        });
-        await ctx.sync();
+        if (includeWorkbook) {
+          (c.sheets || []).forEach(function (sinfo) {
+            var ws = ctx.workbook.worksheets.getItem(sinfo.name);
+            var used = typeof ws.getUsedRangeOrNullObject === "function" ? ws.getUsedRangeOrNullObject() : ws.getUsedRange();
+            used.load(["address", "rowCount", "columnCount", "rowIndex", "columnIndex", "isNullObject"]);
+            var tables = ws.tables;
+            tables.load("items/name");
+            details.push({ ws: ws, used: used, tables: tables, name: sinfo.name, info: null });
+          });
+          await ctx.sync();
+        }
 
-        var budget = CONTEXT_CHAR_BUDGET;
-        var usedChars = 0;
+        var budget = createContextBudget(CONTEXT_CHAR_BUDGET);
         details.forEach(function (d) {
           var info = { name: d.name, address: "", rows: 0, cols: 0, tables: [], tsv: "", formulas: [], sampleAddress: "" };
           try {
@@ -770,8 +868,7 @@
             info.cols = Number(d.used.columnCount || 0);
             (d.tables.items || []).forEach(function (t) { if (t.name) info.tables.push(t.name); });
             var focused = (d.name === c.sheet) || (state.mentionedSheets.indexOf(d.name) >= 0);
-            var includeValues = true;
-            if (includeValues && info.rows > 0 && info.cols > 0 && usedChars < budget) {
+            if (info.rows > 0 && info.cols > 0) {
               var startRow = Number(d.used.rowIndex || 0) + 1;
               var startCol = Number(d.used.columnIndex || 0);
               var rowCap = focused ? WORKBOOK_ROW_CAP : 40;
@@ -799,42 +896,26 @@
         details.forEach(function (d) {
           if (!d.valueRange) return;
           var info = d.infoRef;
-          var vals = d.valueRange.values || [];
-          var lines = [];
-          for (var r = 0; r < vals.length; r++) {
-            var row = vals[r] || [];
-            lines.push(row.map(function (cell) {
-              var v = cell == null ? "" : String(cell);
-              return v.replace(/\t/g, " ");
-            }).join("\t"));
-          }
-          var block = lines.join("\n");
-          if (usedChars + block.length > CONTEXT_CHAR_BUDGET && lines.length > 1) {
-            block = lines.slice(0, 1).join("\n") + "\n... (context budget exceeded)";
-          }
-          info.tsv = block;
-          usedChars += block.length;
-          var formulas = d.valueRange.formulas || [];
-          for (var fr = 0; fr < formulas.length && info.formulas.length < 250; fr++) {
-            for (var fc = 0; fc < (formulas[fr] || []).length && info.formulas.length < 250; fc++) {
-              var formulaValue = formulas[fr][fc];
-              if (typeof formulaValue === "string" && formulaValue.charAt(0) === "=") {
-                info.formulas.push(colName(d.sampleStartCol + fc) + (d.sampleStartRow + fr) + "=" + formulaValue);
-              }
-            }
-          }
-          usedChars += info.formulas.join("\n").length;
+          info.tsv = contextTsvOf(d.valueRange.values || [], budget, []).join("\n");
+          info.formulas = contextFormulaLines(d.valueRange.formulas || [], budget, Number(d.sampleStartCol || 0), Number(d.sampleStartRow || 0));
+          c.contextTruncated = budget.truncated;
         });
 
         return c;
       });
+      if (contextToken === state.contextReadToken) {
+        state.context = next;
+        refreshContextDisplay();
+      }
     } catch (err) {
-      state.context = null;
-      $("contextInfo").textContent = "Could not read workbook context: " + err.message;
-      $("ctxSheets").innerHTML = "";
+      if (contextToken === state.contextReadToken) {
+        state.context = null;
+        $("contextInfo").textContent = "Could not read workbook context: " + err.message;
+        $("ctxSheets").innerHTML = "";
+        refreshContextDisplay();
+      }
       return;
     }
-    refreshContextDisplay();
   }
 
   function refreshContextDisplay() {
@@ -844,18 +925,28 @@
       $("ctxSheets").innerHTML = "";
       return;
     }
+    var flags = [];
+    if (c.truncated) flags.push("truncated");
+    if (c.charTruncated) flags.push("context budget");
+    if (c.formula) flags.push("formula");
+    if (!contextOption("includeSelection", true)) flags.push("selection off");
+    if (!contextOption("includeWorkbook", true)) flags.push("workbook samples off");
+    var flagText = flags.length ? "  ·  " + flags.join("  ·  ") : "";
+    var addressRef = String(c.address || "").split("!").pop();
     $("contextInfo").textContent =
-      c.sheet + "!" + c.address.split("!").pop() + "  ·  " + c.rowCount + "×" + c.columnCount +
-      (c.truncated ? "  ·  truncated" : "") + (c.formula ? "  ·  formula" : "");
+      c.sheet + "!" + addressRef + "  ·  " + c.rowCount + "×" + c.columnCount + flagText;
 
     var chips = "";
-    (c.sheets || []).forEach(function (s) {
-      var marked = state.mentionedSheets.indexOf(s.name) >= 0;
-      chips += '<span class="ctx-chip">' + escapeHtml(s.name) + (marked ? " @" : "") + "</span>";
-    });
-    $("ctxSheets").innerHTML = chips
-      ? '<span style="font-size:11px;color:var(--text-soft);margin-right:6px;">Workbook:</span>' + chips
-      : "";
+    if (contextOption("includeWorkbook", true)) {
+      (c.sheets || []).forEach(function (s) {
+        var marked = state.mentionedSheets.indexOf(s.name) >= 0;
+        chips += '<span class="ctx-chip">' + escapeHtml(s.name) + (marked ? " @" : "") + "</span>";
+      });
+      if (!chips) chips = '<span class="ctx-chip">none</span>';
+      $("ctxSheets").innerHTML = '<span style="font-size:11px;color:var(--text-soft);margin-right:6px;">Workbook:</span>' + chips;
+    } else {
+      $("ctxSheets").innerHTML = '<span style="font-size:11px;color:var(--text-soft);margin-right:6px;">Workbook samples off</span>';
+    }
   }
 
   async function refreshContext() {
@@ -1114,28 +1205,38 @@
 
   function buildPrompt(question) {
     var c = state.context || {};
+    var includeWorkbook = contextOption("includeWorkbook", true);
+    var includeSelection = contextOption("includeSelection", true);
     var parts = [PREAMBLE];
 
-    parts.push("");
-    parts.push("## Workbook context");
-    parts.push("Active sheet: " + (c.sheet || "—") + " (workbook sheets: " +
-      ((c.sheets && c.sheets.length) ? c.sheets.map(function (s) { return s.name; }).join(", ") : "none") + ")");
-    if (state.mentionedSheets.length) {
-      parts.push("Focus sheets (@mentioned): " + state.mentionedSheets.join(", "));
+    if (includeWorkbook) {
+      parts.push("");
+      parts.push("## Workbook context");
+      parts.push("Active sheet: " + (c.sheet || "—") + " (workbook sheets: " +
+        ((c.sheets && c.sheets.length) ? c.sheets.map(function (s) { return s.name; }).join(", ") : "none") + ")");
+      if (state.mentionedSheets.length) {
+        parts.push("Focus sheets (@mentioned): " + state.mentionedSheets.join(", "));
+      }
+      if (c.sheetDetails && c.sheetDetails.length) {
+        c.sheetDetails.forEach(function (d) {
+          var line = "Sheet " + d.name + ": " + (d.address || "—") + " (" + d.rows + "×" + d.cols + ")";
+          if (d.tables && d.tables.length) line += "; tables: " + d.tables.join(", ");
+          parts.push(line);
+          if (d.tsv) parts.push("  Values from " + (d.sampleAddress || d.address) + " (TSV):\n" + d.tsv);
+          if (d.formulas && d.formulas.length) parts.push("  Live formulas (cell=formula):\n" + d.formulas.join("\n"));
+        });
+      }
+      if (c.contextTruncated) parts.push(CONTEXT_TRUNCATION_NOTE);
+    } else if (includeSelection && c.address) {
+      parts.push("");
+      parts.push("## Selection context");
+      parts.push("Active sheet: " + (c.sheet || "—"));
     }
-    if (c.sheetDetails && c.sheetDetails.length) {
-      c.sheetDetails.forEach(function (d) {
-            var line = "Sheet " + d.name + ": " + (d.address || "—") + " (" + d.rows + "×" + d.cols + ")";
-        if (d.tables && d.tables.length) line += "; tables: " + d.tables.join(", ");
-        parts.push(line);
-        if (d.tsv) parts.push("  Values from " + (d.sampleAddress || d.address) + " (TSV):\n" + d.tsv);
-        if (d.formulas && d.formulas.length) parts.push("  Live formulas (cell=formula):\n" + d.formulas.join("\n"));
-      });
-    }
-    if (c && $("includeSelection").checked && c.tsv) {
+    if (includeSelection && c.tsv) {
       parts.push("Selection " + c.address + " (" + c.rowCount + " rows × " + c.columnCount + " columns" + (c.truncated ? ", truncated" : "") + "), values as TSV:");
       if (c.formula) parts.push("Selected cell formula: " + c.formula);
       parts.push(c.tsv);
+      if (c.charTruncated) parts.push(CONTEXT_TRUNCATION_NOTE);
     }
     if (state.attachments.length) {
       parts.push("");
@@ -1341,6 +1442,10 @@
       if (ro !== null) state.readOnly = ro === "true";
       var ap = localStorage.getItem(APPROVAL_KEY);
       if (ap === "always" || ap === "auto" || ap === "never") state.approvalMode = ap;
+      var incSel = localStorage.getItem(INCLUDE_SELECTION_KEY);
+      if (incSel !== null) $("includeSelection").checked = incSel === "true";
+      var incWb = localStorage.getItem(INCLUDE_WORKBOOK_KEY);
+      if (incWb !== null) $("includeWorkbook").checked = incWb === "true";
       var sid = localStorage.getItem(sessionStorageKey());
       if (sid) state.sessionID = sid;
     } catch (err) { /* storage can be disabled inside Office */ }
@@ -1499,6 +1604,14 @@
         renderPlanPreview(state.currentPlan || { operations: [], summary: "" }, false);
       }
       $("btnApplyPlan").disabled = state.readOnly;
+    });
+    $("includeSelection").addEventListener("change", function () {
+      saveSetting(INCLUDE_SELECTION_KEY, $("includeSelection").checked);
+      refreshContext();
+    });
+    $("includeWorkbook").addEventListener("change", function () {
+      saveSetting(INCLUDE_WORKBOOK_KEY, $("includeWorkbook").checked);
+      refreshContext();
     });
     $("selApproval").addEventListener("change", function () {
       state.approvalMode = $("selApproval").value;

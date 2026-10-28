@@ -35,13 +35,17 @@
         <select id="skillSelect"><option value="">None</option></select>
       </label>
       <label class="field">
-        <span>Max cells sent</span>
+        <span>Max selected cells sent</span>
         <input id="maxCells" type="number" min="50" max="5000" step="50" value="400" />
       </label>
       <label class="checkbox">
-        <input id="includeSheets" type="checkbox" checked />
-        <span>Include sheet names</span>
+        <input id="includeWorkbook" type="checkbox" checked />
+        <span>Send workbook samples (all sheets: names, used ranges, values, formulas)</span>
       </label>
+      <div class="hint">
+        The selection control only adds the selected cells. Turning it off still sends workbook samples. Turning off
+        &quot;Send workbook samples&quot; sends no sheet data at all; the setting is remembered per browser.
+      </div>
       <label class="checkbox">
         <input id="chkReadOnly" type="checkbox" />
         <span>Read-only mode (questions only, no workbook changes)</span>
@@ -123,7 +127,7 @@
         <button id="btnClearAttachments" class="link-btn">Clear</button>
       </div>
       <section class="context">
-        <label class="context-pill" title="Include the selected cells as context">
+        <label class="context-pill" title="Include the selected cells in the prompt as context. This does not turn off workbook samples; those are controlled in Settings.">
           <input id="includeSelection" type="checkbox" checked />
           <span class="sheet-glyph">▦</span>
           <span id="contextInfo" class="context-info">No selection</span>

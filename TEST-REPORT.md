@@ -1,6 +1,6 @@
 # Test report
 
-Ran on Node 24 (Windows 11). **352 automated checks across six suites, all passing**, plus
+Ran on Node 24 (Windows 11). **386 automated checks across six suites, all passing**, plus
 a live end-to-end verification against a real **OpenCode 2.1.4** service and the real task
 pane. The automated suites run offline against mock OpenCode services on isolated ports, so
 they can run while the add-in is in use.
@@ -12,12 +12,12 @@ npm run test:e2e  # original curl-driven end-to-end script
 
 | Suite | What it exercises | Checks |
 |---|---|---|
-| `tools/test-lib.mjs` | Pure helpers: markdown rendering, table extraction, A1 maths, escaping, header/column detection, **plan parsing, destructive classification, cell caps, auto-approval, operation-specific snapshots, formula fills** | **106** |
+| `tools/test-lib.mjs` | Pure helpers: markdown rendering, table extraction, A1 maths, escaping, header/column detection, **plan parsing, destructive classification, cell caps, auto-approval, operation-specific snapshots, formula fills, row/column normalization, chart argument order** | **129** |
 | `tools/test-format.mjs` | Native formatter against a fake Excel model: table, summary, number formats, freeze/print, conditional formatting, idempotency, **preflight failure without mutation** | **50** |
 | `tools/test-health.mjs` | Launcher health check, dev CA, strict-vs-CA validation, 503 handling | **7** |
 | `tools/test-starter.mjs` | Starter workbook: embedded add-in ID/version synchronization, valid XML declaration, ZIP extraction, packaged and prepared-file validation | **7** |
 | `tools/test-bridge.mjs` | Real bridge over HTTP/SSE: discovery, auth, v1 + v2 protocols, models, provider errors, resilience, hardening, **token/origin/host controls, attachment and audit endpoints** | **65** |
-| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **117** |
+| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **128** |
 
 ## How the pane is tested without Excel
 
@@ -34,7 +34,14 @@ exactly:
 * `Copy` puts the answer on the clipboard
 * context refreshes on `onSelectionChanged`, marks large ranges *truncated*, and caps the
   TSV at `maxCells / columnCount` rows
-* `Send selection` off removes the selection from the prompt
+* a huge selection loads only its dimensions first; values and formulas are requested for the
+  capped top-left sample, so the cap is applied before the data pipeline
+* workbook samples and selection context are each bounded by a **30,000-character** budget,
+  individual cells are clipped to 500 characters and formulas to 1,000, and the prompt reports
+  truncation instead of exceeding the budget
+* turning off **Send workbook samples** skips every sheet read and removes workbook data from the
+  prompt while keeping the selection; the state is remembered and reflected in the context pill
+* `Send selection` off removes the selection from the prompt without disabling workbook samples
 * Stop finalises the turn; New chat clears the transcript; a dead bridge raises a banner
   **and** an in-transcript error
 * the **model dropdown** is populated from `/api/models`, groups by provider, persists the
@@ -56,6 +63,11 @@ exactly:
 * **structural plans never offer misleading add-in Undo**; the banner directs the user to Excel
   Undo or a backup. A separate cell-only plan shows the add-in Undo row and restores the exact
   before-values
+* **row/column plans normalize cell-shaped ranges to whole rows or columns**, honor `count`,
+  reject `at` combined with `range`, and reject a `count` that conflicts with a multi-row or
+  multi-column span
+* **chart plans call `charts.add(chartType, source, seriesBy)` once** in the documented order and
+  report a deferred sync error as a failed operation without retrying
 * **formatting undo honesty**: single-cell cell-local formatting is snapshotted and restored;
   multi-cell, border, row-height, column-width, and autofit formatting are not add-in-undoable
 * **native Format sheet invalidates older snapshots** before it can insert rows or rewrite cells,
@@ -170,6 +182,11 @@ Verified on the user's machine against `http://127.0.0.1:28894` (v2.1.4):
 | 31 | `columnWidth`, `rowHeight`, and autofit formatting on one cell passed the five-cell auto-approval gate even though they affect whole columns or rows | Dimension-changing and autofit formatting always require review; auto-approval is limited to cell-local formatting |
 | 32 | The starter test used `tar` to read an `.xlsx` ZIP, so Linux runs checked an empty XML string; the packaged workbook also embedded version `1.0.0.0` while the manifest declared `1.2.0.0` | Use `fflate` for ZIP extraction with explicit errors, validate the packaged and prepared files, and update the packaged reference to `1.2.0.0` |
 | 33 | CI's Windows bridge startup hung inside a PowerShell certificate-install prompt until the health test timed out | Tests generate/use certificate files without touching the OS trust store, and bridge output is printed when startup fails |
+| 34 | A huge selection loaded every value and formula before the cell cap was applied, risking a multi-megabyte Office.js payload | Read the range dimensions first, then load values/formulas only for a capped top-left sample |
+| 35 | The workbook-context limit could be exceeded by a large first row or a single oversized cell, and formulas were counted after values | Apply one shared 30,000-character budget while building TSV and formula lines, clip each cell to 500 characters and each formula to 1,000, and report truncation |
+| 36 | Chart creation called `charts.add` with the wrong argument order and could retry after a deferred sync error | Use `charts.add(chartType, source, seriesBy)` once and surface a deferred error as a failed operation |
+| 37 | Row/column edits accepted cell-shaped ranges and ambiguous `at` + `range` or `count` combinations, so preview and execution could touch the wrong cells | Normalize to whole-row/whole-column ranges and reject ambiguous or conflicting inputs before preview |
+| 38 | Turning off the selection checkbox still sent workbook samples, with no separate control or disclosure | Add an independent **Send workbook samples** setting, skip all sheet reads when it is off, persist both choices, and state clearly what each control sends |
 
 ## Not covered (needs your machine)
 

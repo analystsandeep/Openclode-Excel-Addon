@@ -24,6 +24,7 @@ const BASE = `https://localhost:${BRIDGE_PORT}`;
 const HOME = "/tmp/panetest-home";
 const BRIDGE_TOKEN = "pane-test-token";
 
+const usedRangeReads = { count: 0 };
 let failures = 0;
 const check = (name, actual, expected) => {
   const ok = JSON.stringify(actual) === JSON.stringify(expected);
@@ -111,6 +112,7 @@ function createFakeExcel() {
       return makeHandle(a1);
     },
     getUsedRange() {
+      usedRangeReads.count += 1;
       return makeHandle("Sheet1!A1:D20", { rowCount: 20, columnCount: 4, address: "Sheet1!A1:D20", values: selection.values });
     },
     tables: { items: [], load() {} },
@@ -147,7 +149,19 @@ function createFakeExcel() {
     columnCount: 4,
     values: [["Name", "Amount"], ["ACME", 10], ["Globex", 20]],
     formulas: [["Name", "Amount"], ["ACME", 10], ["Globex", 20]],
-    load() {},
+    loaded: [],
+    sampleRequests: [],
+    load(props) { this.loaded.push(props); },
+    getAbsoluteResizedRange(rows, cols) {
+      this.sampleRequests.push([rows, cols]);
+      return {
+        rowCount: rows,
+        columnCount: cols,
+        get values() { return selection.values.slice(0, rows).map((row) => (row || []).slice(0, cols)); },
+        get formulas() { return selection.formulas.slice(0, rows).map((row) => (row || []).slice(0, cols)); },
+        load() {},
+      };
+    },
   };
   // Before-state the formatter/snapshot reads back for the undo test.
   cellStore["A1:B1"] = { values: [["Name", "Amount"]] };
@@ -681,6 +695,46 @@ async function main() {
     ok("prompt says truncated", capped.includes("truncated"), capped.slice(0, 80));
     ok("prompt caps rows (<= 20 rows for a 20-column range)", tsvLines <= 20, `tsv lines: ${tsvLines}`);
 
+    // huge selections must be sampled before values/formulas are loaded
+    fake.selection.loaded = [];
+    fake.selection.sampleRequests = [];
+    await fake.selectionHandlers[0]();
+    await sleep(300);
+    const loadedProps = fake.selection.loaded.flat();
+    ok("selection loads dimensions before values", loadedProps.every((p) => !p.includes("values") && !p.includes("formulas")), JSON.stringify(loadedProps));
+    check("selection samples the capped top-left block", fake.selection.sampleRequests.pop(), [20, 20]);
+
+    // 30,000 character budget across sheet samples and selection
+    const oversized = "X".repeat(40000);
+    const clippedCell = oversized.slice(0, 500) + " [truncated]";
+    const longRows = Array.from({ length: 20 }, () => Array.from({ length: 4 }, () => oversized));
+    fake.selection.values = longRows;
+    fake.selection.formulas = Array.from({ length: 20 }, () => Array.from({ length: 4 }, () => null));
+    fake.cellStore["A1:D20"] = { values: longRows, formulas: undefined };
+    window.document.getElementById("includeSelection").checked = false;
+    await fake.selectionHandlers[0]();
+    await sleep(300);
+    window.document.getElementById("input").value = "what is in the workbook?";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    const budgeted = lastPrompt();
+    const ctxStart = budgeted.indexOf("## Workbook context");
+    const ctxEnd = budgeted.indexOf("## Task");
+    const workbookContext = budgeted.slice(ctxStart, ctxEnd);
+    ok("workbook context respects the 30,000-character budget", workbookContext.length <= 30500, `workbook context length: ${workbookContext.length}`);
+    ok("workbook context reports truncation", budgeted.includes("... (workbook context truncated at 30,000 characters)"));
+    ok("workbook context does not contain the oversized cell", !budgeted.includes(oversized));
+    ok("workbook context clips individual cell strings", budgeted.includes(clippedCell));
+    fake.selection.values = [["Name", "Amount"], ["ACME", 10], ["Globex", 20]];
+    fake.selection.formulas = [["Name", "Amount"], ["ACME", 10], ["Globex", 20]];
+    fake.selection.rowCount = 20;
+    fake.selection.columnCount = 4;
+    fake.selection.address = "Sheet1!A1:D20";
+    fake.cellStore["A1:D20"] = { values: undefined, formulas: undefined };
+    window.document.getElementById("includeSelection").checked = true;
+    await fake.selectionHandlers[0]();
+    await sleep(300);
+
     // selection can be excluded
     window.document.getElementById("includeSelection").checked = false;
     window.document.getElementById("input").value = "hello no context";
@@ -688,6 +742,27 @@ async function main() {
     await waitTurn();
     ok("prompt omits the selection when unchecked", !lastPrompt().includes("Selection Sheet1!"), lastPrompt().slice(0, 80));
     window.document.getElementById("includeSelection").checked = true;
+
+    // no-workbook-context option: sheet reads and samples are skipped entirely
+    window.document.getElementById("includeWorkbook").checked = false;
+    window.document.getElementById("includeWorkbook").dispatchEvent(new window.Event("change"));
+    usedRangeReads.count = 0;
+    await fake.selectionHandlers[0]();
+    await sleep(300);
+    check("no-workbook-context skips sheet reads", usedRangeReads.count, 0);
+    ok("context flags workbook samples off", /workbook samples off/.test(window.document.getElementById("contextInfo").textContent), window.document.getElementById("contextInfo").textContent);
+    window.document.getElementById("input").value = "hello with no workbook context";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    const noWorkbook = lastPrompt();
+    ok("prompt omits workbook samples when disabled", !noWorkbook.includes("## Workbook context") && !noWorkbook.includes("Values from"), noWorkbook.slice(0, 120));
+    ok("prompt keeps the selection when only workbook samples are off", noWorkbook.includes("Selection Sheet1!A1:D20"));
+
+    window.document.getElementById("includeWorkbook").checked = true;
+    window.document.getElementById("includeWorkbook").dispatchEvent(new window.Event("change"));
+    await fake.selectionHandlers[0]();
+    await sleep(300);
+    ok("context restores workbook samples when re-enabled", !/workbook samples off/.test(window.document.getElementById("contextInfo").textContent), window.document.getElementById("contextInfo").textContent);
 
     // typed text + quick action are combined
     window.document.getElementById("input").value = "focus on column B";
