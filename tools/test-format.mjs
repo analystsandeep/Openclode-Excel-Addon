@@ -476,6 +476,7 @@ async function main() {
     error = err;
   }
   ok("throws a friendly error for a header-only sheet", !!error && /no data rows/i.test(error.message), error && error.message);
+  ok("header-only failure does not mutate the sheet", !fake3.ops.some((op) => ["insert", "values", "addTable", "merge"].includes(op.kind)), JSON.stringify(fake3.ops));
 
   console.log(failures ? `\n${failures} FAILURE(S)` : "\nAll formatter tests passed");
   process.exit(failures ? 1 : 0);

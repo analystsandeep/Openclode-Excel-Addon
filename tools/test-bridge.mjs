@@ -5,6 +5,7 @@
  *   node tools/test-bridge.mjs
  */
 import fs from "node:fs";
+import https from "node:https";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,17 @@ const DEFAULT_PORT = process.env.TEST_DEFAULT_PORT || "49375";
 const MOCK_URL = `http://127.0.0.1:${MOCK_PORT}`;
 const BRIDGE = `https://localhost:${BRIDGE_PORT}`;
 const TMP = "/tmp/bridgetest";
+const BRIDGE_TOKEN = "bridge-test-token";
+const rawFetch = globalThis.fetch;
+
+// Routine bridge calls authenticate exactly as the task pane does. Security
+// regressions use rawFetch below to verify missing/invalid credentials fail.
+globalThis.fetch = (url, options = {}) => {
+  if (!String(url).startsWith(`${BRIDGE}/api/`)) return rawFetch(url, options);
+  const headers = new Headers(options.headers || {});
+  headers.set("x-opencode-excel-token", BRIDGE_TOKEN);
+  return rawFetch(url, { ...options, headers });
+};
 
 let failures = 0;
 let checks = 0;
@@ -51,6 +63,7 @@ function startBridge(env, home) {
       XDG_STATE_HOME: path.join(home, ".local", "state"),
       XDG_CONFIG_HOME: path.join(home, ".config"),
       OPENCODE_SERVICE_DEFAULT_PORTS: DEFAULT_PORT,
+      BRIDGE_API_TOKEN: BRIDGE_TOKEN,
       PORT: BRIDGE_PORT,
       ...env,
     },
@@ -125,6 +138,30 @@ async function newSession() {
     body: "{}",
   });
   return res.json();
+}
+
+/** Fetch a raw status code while overriding the Host header (fetch may ignore it). */
+function statusWithHost(host) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        host: "127.0.0.1",
+        port: BRIDGE_PORT,
+        path: "/api/status",
+        method: "GET",
+        headers: { host },
+        rejectUnauthorized: false,
+        timeout: 5000,
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => resolve(res.statusCode));
+      }
+    );
+    req.on("timeout", () => req.destroy(new Error("host probe timed out")));
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 async function prompt(sessionID, text, agent, model) {
@@ -344,6 +381,15 @@ async function main() {
     kill.push(bridge.proc);
     await waitForStatus((s) => s && s.connected);
 
+    const unauthAudit = await rawFetch(`${BRIDGE}/api/audit`);
+    ok("audit endpoint rejects missing authentication", unauthAudit.status === 401, `status ${unauthAudit.status}`);
+    const badOrigin = await rawFetch(`${BRIDGE}/api/audit`, {
+      headers: { "x-opencode-excel-token": BRIDGE_TOKEN, origin: "https://unrelated.example" },
+    });
+    ok("API rejects an unrelated browser origin", badOrigin.status === 403, `status ${badOrigin.status}`);
+    const badHostStatus = await statusWithHost(`example.test:${BRIDGE_PORT}`);
+    ok("bridge rejects an unrelated Host header", badHostStatus === 403, `status ${badHostStatus}`);
+
     const unknown = await fetch(`${BRIDGE}/api/nope`);
     ok("unknown endpoint -> 404", unknown.status === 404, `status ${unknown.status}`);
 
@@ -384,7 +430,10 @@ async function main() {
 
     const pane = await fetch(`${BRIDGE}/taskpane.html`);
     ok("pane served as html", pane.status === 200 && /text\/html/.test(pane.headers.get("content-type") || ""), pane.headers.get("content-type"));
-    ok("pane loads the formatter script", (await pane.text()).includes('src="format.js"'));
+    const paneBody = await pane.text();
+    ok("pane loads the formatter script", paneBody.includes('src="format.js"'));
+    ok("pane receives the bridge API token", paneBody.includes(`content="${BRIDGE_TOKEN}"`), paneBody.slice(0, 200));
+    ok("pane does not expose the token placeholder", !paneBody.includes("__OPENCODE_EXCEL_BRIDGE_TOKEN__"));
     const css = await fetch(`${BRIDGE}/taskpane-clean.css`);
     ok("clean UI css served with the right mime type", /text\/css/.test(css.headers.get("content-type") || ""), css.headers.get("content-type"));
     const cssBody = await css.text();

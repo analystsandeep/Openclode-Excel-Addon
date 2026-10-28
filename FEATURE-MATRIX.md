@@ -19,14 +19,18 @@ conservative: a feature is marked complete only when the add-in has an executabl
 
 - JSON change plans with exact sheets/ranges, assumptions, operation counts, and affected-cell
   estimates.
-- Per-operation approval, select-all, read-only mode, small-change auto-approval, and explicit
-  never-ask mode.
+- Per-operation approval, select-all, and read-only mode. Automatic approval is limited to finite,
+  non-destructive formatting; destructive, structural, and object operations are never
+  auto-applied.
 - Values, formulas, R1C1 formula fills, clearing, row/column insertion and deletion, sheet add /
   rename / delete, formatting and borders, autofit, merge/unmerge, tables, sorting, basic charts,
   and freeze panes.
-- Before-value/formula/number-format/basic-format snapshots, an eight-entry undo stack, Excel
-  Ctrl+Z compatibility, and local JSONL audit records.
-- Direct answer/table/formula insertion now uses the same snapshot, audit, and undo path.
+- Bounded before-value/formula/number-format/basic-format snapshots and an eight-entry undo stack
+  for cell-only operations (`setValues`, `setFormulas`, `formatRange`). Merge, sort, clear,
+  row/column, sheet, table, and chart operations are not add-in-undoable.
+- For structural edits, use Excel's own Undo where available or restore a backup. All changes are
+  recorded in local JSONL audit records.
+- Direct answer/table/formula insertion uses the same snapshot and audit path for the cell writes.
 
 ### Analysis and inputs
 
@@ -46,9 +50,10 @@ conservative: a feature is marked complete only when the add-in has an executabl
   chosen provider/model and its media support.
 - **Web citations and MCP tools:** available only when the OpenCode workspace has an approved
   search provider or MCP/app connection and its permissions allow use.
-- **Undo of structural objects:** cell content and common formatting are snapshotted. Complex
-  objects such as deleted charts/tables and every sheet-level setting still rely on Excel's own
-  undo behavior and should be reviewed carefully.
+- **Undo of structural objects:** the add-in deliberately does not offer Undo for row/column,
+  sheet, table, chart, merge, sort, or clear operations because it cannot completely reverse them.
+  Use Excel's own Undo or a backup for those changes. Cell-level snapshots are capped at 5,000
+  cells, and unknown or named ranges are never auto-approved or snapshotted.
 - **Charts:** common chart creation/deletion and positioning are supported; advanced styling and
   specialized chart types are not.
 - **VBA and PivotTables:** the assistant can explain or generate instructions/code, but the add-in

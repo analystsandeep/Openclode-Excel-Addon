@@ -1,6 +1,6 @@
 # Test report
 
-Ran on Node 24 (Windows 11). **270 automated checks across six suites, all passing**, plus
+Ran on Node 24 (Windows 11). **316 automated checks across six suites, all passing**, plus
 a live end-to-end verification against a real **OpenCode 2.1.4** service and the real task
 pane. The automated suites run offline against mock OpenCode services on isolated ports, so
 they can run while the add-in is in use.
@@ -12,12 +12,12 @@ npm run test:e2e  # original curl-driven end-to-end script
 
 | Suite | What it exercises | Checks |
 |---|---|---|
-| `tools/test-lib.mjs` | Pure helpers: markdown rendering, table extraction, A1 maths, escaping, header/column detection, **plan parsing** | **53** |
-| `tools/test-format.mjs` | Native formatter against a fake Excel model: table, summary, number formats, freeze/print, conditional formatting, idempotency | **49** |
+| `tools/test-lib.mjs` | Pure helpers: markdown rendering, table extraction, A1 maths, escaping, header/column detection, **plan parsing, destructive classification, cell caps, auto-approval, snapshots, formula fills** | **82** |
+| `tools/test-format.mjs` | Native formatter against a fake Excel model: table, summary, number formats, freeze/print, conditional formatting, idempotency, **preflight failure without mutation** | **50** |
 | `tools/test-health.mjs` | Launcher health check, dev CA, strict-vs-CA validation, 503 handling | **7** |
-| `tools/test-starter.mjs` | Runtime starter workbook: embedded add-in ID/version synchronization and valid XML declaration | **4** |
-| `tools/test-bridge.mjs` | Real bridge over HTTP/SSE: discovery, auth, v1 + v2 protocols, models, provider errors, resilience, hardening, **attachment and audit endpoints** | **60** |
-| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **97** |
+| `tools/test-starter.mjs` | Starter workbook: embedded add-in ID/version synchronization, valid XML declaration, cross-platform packaged-file validation | **4** |
+| `tools/test-bridge.mjs` | Real bridge over HTTP/SSE: discovery, auth, v1 + v2 protocols, models, provider errors, resilience, hardening, **token/origin/host controls, attachment and audit endpoints** | **65** |
+| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **108** |
 
 ## How the pane is tested without Excel
 
@@ -52,7 +52,14 @@ exactly:
   shows a success banner, and restores its label afterwards
 * the **agentic plan flow**: a mock plan answer renders the change preview with per-operation
   checkboxes (destructive ops unchecked by default), applying executes the operations through
-  the fake Excel model, **Undo** restores the before-snapshot, and read-only mode disables Apply
+  the fake Excel model, and read-only mode disables Apply
+* **structural plans never offer misleading add-in Undo**; the banner directs the user to Excel
+  Undo or a backup. A separate cell-only plan shows the add-in Undo row and restores the exact
+  before-values
+* **approval guards**: both automatic-approval modes never auto-apply `deleteSheet`, and destructive
+  operations remain unchecked and require explicit selection
+* the formatter's header-only failure leaves the fake sheet unchanged (no inserted rows, header
+  rewrites, table, or merge)
 * **attachments**: attached files are listed as chips and their names/content flow into the prompt
 * **@sheet mentions**: `@Sheet2` focuses that sheet's data in the prompt
 * **settings persistence**: model choice, read-only mode and approval gates survive in localStorage
@@ -71,7 +78,8 @@ exactly:
 * columns are autofit after the summary is written (Office.js `columnWidth` is not in Excel's character unit)
 * a second run reuses `tblSales`, does not insert rows, duplicate tables, merge again or add conditional formats
 * an existing table starting at row 1 is restyled without a summary above it
-* a header-only sheet throws a friendly "no data rows" error
+* a header-only sheet throws a friendly "no data rows" error before inserting rows, rewriting
+  headers, creating a table, or merging cells
 
 ## Bridge scenarios covered
 
@@ -89,10 +97,17 @@ exactly:
 12. **Provider failure**: a real v2 `error` object is surfaced on the `done` event with no invented text
 13. **Audit log**: `POST /api/audit` appends JSONL to `workspace/audit.log`; `GET /api/audit` returns the recent entries
 14. **Native attachments**: upload, filename sanitization, invalid-base64 rejection, and removal
+15. **Access controls**: the bridge binds to loopback, injects a per-launch token into the pane,
+    rejects unauthenticated API calls (including `/api/audit`), and rejects unrelated `Origin` and
+    `Host` headers
 
 ## Live verification (real OpenCode 2.1.4, real pane)
 
 Verified on the user's machine against `http://127.0.0.1:28894` (v2.1.4):
+
+> This live run was recorded before the bridge token/origin/host hardening. The current
+> token-authenticated HTTP and SSE flow is covered end to end by `test-bridge` and `test-pane`;
+> the pane itself only changed by reading the token the bridge injects into its HTML.
 
 * `/api/models` returned **57 models**, grouped by provider in the pane
 * two real turns, switching model per turn through `POST /api/session/{id}/model`:
@@ -134,6 +149,16 @@ Verified on the user's machine against `http://127.0.0.1:28894` (v2.1.4):
 | 15 | Plans advertised `{at,count}` row/column edits but generated no executable range | Normalize them to exact row/column ranges before preview |
 | 16 | Worksheet context passed `Sheet!A1:B2` to `Worksheet.getRange`, which expects a local address | Build local ranges from the used-range row/column indexes |
 | 17 | Binary attachments were filename-only and the initial file picker was not reachable | Add a visible Attach button and OpenCode V2 native file URI flow |
+| 18 | A failed `addSheet` was still recorded as a created sheet, so Undo could delete a pre-existing worksheet with the same name | Snapshots now cover only successful-cell-shaped operations and never record intended sheet creation |
+| 19 | `deleteSheet`, `deleteTable`, and `deleteChart` counted as zero cells, so the old `<= 5` auto-approval rule could delete objects without review | Operations without a finite cell range now count as unbounded, and auto-approval is limited to finite non-destructive formatting |
+| 20 | Structural Undo restored cell contents but not inserted/deleted rows, columns, sheets, tables, or charts | Add-in Undo is no longer offered for structural/object plans; the banner directs users to Excel Undo or a backup |
+| 21 | A horizontal formula fill called `fillRight()` and then overwrote the translated formulas with the original formula | Return immediately after a one-row `fillRight()` and add a regression fake that verifies `=A2`, `=B2`, `=C2` are retained |
+| 22 | `MAX_PREVIEW_CELLS` was declared but not enforced | Oversized finite ranges are rejected during parsing, snapshots re-check the real A1 size, and unknown/named/whole ranges are unbounded and never auto-approved |
+| 23 | `mergeRange` and `sortRange` were classified as safe | Both are destructive, unchecked by default, and never auto-applied |
+| 24 | A failed Undo popped the entry before restoration, preventing a retry | The entry is retained until restoration succeeds; the error tells the user it can be retried |
+| 25 | The native formatter inserted rows and rewrote headers before detecting a header-only sheet | Data-row preflight now runs before any mutation |
+| 26 | The bridge listened on `0.0.0.0` and `/api/audit` was unauthenticated | Bind to `127.0.0.1`, inject a per-launch API token into the pane, validate `Origin` and `Host`, and require the token for every API except `/api/status` |
+| 27 | The starter-workbook test reported "starter workbook is missing" on Linux even when the file existed | Non-Windows runs now validate the packaged starter directly with an accurate skip diagnostic |
 
 ## Not covered (needs your machine)
 
@@ -142,6 +167,9 @@ Verified on the user's machine against `http://127.0.0.1:28894` (v2.1.4):
   prompt/reply work), and the **Format sheet** path has now been run live (table, summary,
   print setup, conditional formatting, idempotency), but it is not part of `npm test`.
 * **Sideloading** on Windows and the `office-addin-dev-certs` trust prompt
+* **Real Excel Undo semantics** — Excel's own Undo is the expected recovery path for Office.js
+  edits, but reversal of row/column/sheet/table/chart operations still needs verification on the
+  target Excel build. The add-in deliberately does not claim that its own Undo can reverse them.
 * **Model quality** — whether the answers actually produce clean ```tsv blocks for `Insert table`
 
 If discovery fails on your PC, send the bridge's startup output plus `opencode service status`

@@ -210,6 +210,7 @@
         var tableRange = table.getRange();
         tableRange.load(["rowIndex", "columnIndex", "rowCount", "columnCount"]);
         await ctx.sync();
+        if (tableRange.rowCount < 2) throw new Error("This sheet has a header row but no data rows.");
 
         headerRow = tableRange.rowIndex + 1;
         firstCol = tableRange.columnIndex + 1;
@@ -250,7 +251,11 @@
         if (hasSummary) {
           headerRow = 4;
           summaryTop = 1;
-          lastRow = probeLastRow;
+          // Validate the data body before rewriting headers or any other cells.
+          lastRow = await trimDataRows(
+            ctx, sheet, firstColLetter, lastColLetter, firstCol, lastCol, headerRow, probeLastRow
+          );
+          if (lastRow <= headerRow) throw new Error("This sheet has a header row but no data rows.");
 
           var existingHeader = sheet.getRange(firstColLetter + headerRow + ":" + lastColLetter + headerRow);
           existingHeader.load("values");
@@ -262,9 +267,17 @@
           headers = lib.cleanHeaders(rawExisting);
           existingHeader.values = [headers];
         } else {
+          // The raw sheet's header and data are still in their original rows.
+          // Preflight them before inserting the summary strip or cleaning a
+          // header so a failed format attempt leaves the workbook untouched.
+          var rawLastRow = await trimDataRows(
+            ctx, sheet, firstColLetter, lastColLetter, firstCol, lastCol, headerStart, probeLastRow
+          );
+          if (rawLastRow <= headerStart) throw new Error("This sheet has a header row but no data rows.");
+
           headerRow = headerStart + (wantSummary ? 3 : 0);
           summaryTop = wantSummary ? headerRow - 3 : 0;
-          lastRow = probeLastRow + (wantSummary ? 3 : 0);
+          lastRow = rawLastRow + (wantSummary ? 3 : 0);
 
           if (wantSummary) {
             sheet.getRange(headerStart + ":" + (headerStart + 2)).insert("Down");
@@ -277,11 +290,6 @@
           headers = lib.cleanHeaders((headerRangeNew.values && headerRangeNew.values[0]) || []);
           headerRangeNew.values = [headers];
         }
-
-        lastRow = await trimDataRows(
-          ctx, sheet, firstColLetter, lastColLetter, firstCol, lastCol, headerRow, lastRow
-        );
-        if (lastRow <= headerRow) throw new Error("This sheet has a header row but no data rows.");
 
         tableName = lib.uniqueTableName(tableNames, "tblSales");
         table = sheet.tables.add(

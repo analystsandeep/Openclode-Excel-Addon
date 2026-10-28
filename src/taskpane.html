@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="opencode-excel-bridge-token" content="__OPENCODE_EXCEL_BRIDGE_TOKEN__" />
   <title>OpenCode for Excel</title>
   <link rel="stylesheet" href="taskpane-clean.css" />
   <!-- Office.js must load from the Microsoft CDN inside Excel.
@@ -49,8 +50,8 @@
         <span>Approval gates</span>
         <select id="selApproval">
           <option value="always">Ask before every change</option>
-          <option value="auto">Auto-apply changes touching 5 or fewer cells</option>
-          <option value="never">Never ask (not recommended)</option>
+          <option value="auto">Auto-apply safe formatting touching 5 or fewer cells</option>
+          <option value="never">Auto-apply safe formatting (review all destructive edits)</option>
         </select>
       </label>
       <div class="hint">
@@ -133,7 +134,7 @@
       <div id="undoRow" class="stop-row hidden">
         <span id="undoText">Undo last change?</span>
         <button id="btnUndo" class="ghost-btn">Undo</button>
-        <span class="undo-hint" id="undoHint">or press Ctrl+Z in Excel</span>
+        <span class="undo-hint" id="undoHint">cell edits only; use Excel Undo or a backup for structural changes</span>
       </div>
       <div id="stopRow" class="stop-row hidden">
         <span id="activity">Working…</span>

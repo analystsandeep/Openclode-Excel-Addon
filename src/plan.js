@@ -4,9 +4,10 @@
  * instead of free text. The pane reviews the plan (cell-level references,
  * destructive-flag, per-operation approval), the user approves individual
  * operations, and this module executes them through Office.js. Because
- * Office.js edits enter Excel's own undo stack, Ctrl+Z always works; this
- * module additionally keeps a before-snapshot so the pane can offer an
- * "Undo last change" button.
+ * Excel may make Office.js edits available to its native Undo command. This
+ * module also keeps bounded before-snapshots for a small, explicit set of
+ * cell-only operations. Structural and object operations are never presented
+ * as safely reversible by the add-in.
  *
  * Plan schema (version 1):
  * {
@@ -73,7 +74,7 @@
     return n - 1;
   }
 
-  /** Best-effort cell count for review and approval gates. */
+  /** Exact cell count for finite A1 ranges; unknown/named/whole ranges are unbounded. */
   function rangeCellCount(address) {
     var ref = addressParts(address).ref.replace(/\$/g, "");
     var m = ref.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
@@ -86,7 +87,7 @@
     if (m) return Infinity; // whole rows: exact width depends on the used range
     m = ref.match(/^([A-Z]+):([A-Z]+)$/i);
     if (m) return Infinity; // whole columns: exact height depends on the used range
-    return 0;
+    return Infinity;
   }
 
   function rangeDimensions(address) {
@@ -141,8 +142,40 @@
       case "deleteRows": case "deleteColumns": case "deleteSheet":
       case "deleteTable": case "deleteChart": return true;
       case "insertRows": case "insertColumns": return true; // shifts existing data
+      case "mergeRange": case "unmergeRange": case "sortRange": return true;
       default: return false;
     }
+  }
+
+  // Only these finite, non-destructive operations may bypass review. Workbook
+  // writes, structural edits and object changes always require explicit review.
+  var AUTO_SAFE_OPS = { formatRange: true, autofitRange: true };
+
+  // Snapshots can fully restore only the basic cell state changed by these
+  // operations. Clear/merge/sort/row/column/sheet/table/chart operations can
+  // affect metadata or structure that this module deliberately does not claim
+  // to reconstruct.
+  var UNDO_SAFE_OPS = { setValues: true, setFormulas: true, formatRange: true };
+
+  function finiteCellOperation(o) {
+    return !!o && Number.isFinite(o.cellCount) && o.cellCount > 0 && o.cellCount <= MAX_PREVIEW_CELLS;
+  }
+
+  function isUndoSafe(o) {
+    return !!(o && UNDO_SAFE_OPS[o.op] && finiteCellOperation(o));
+  }
+
+  function canAutoApply(ops, maxCells) {
+    if (!Array.isArray(ops) || !ops.length) return false;
+    var limit = Math.min(MAX_PREVIEW_CELLS, Math.max(0, Number(maxCells || 0)));
+    var total = 0;
+    for (var i = 0; i < ops.length; i++) {
+      var o = ops[i];
+      if (!o || o.destructive || !AUTO_SAFE_OPS[o.op] || !finiteCellOperation(o)) return false;
+      total += o.cellCount;
+      if (!Number.isFinite(total) || total > limit) return false;
+    }
+    return true;
   }
 
   function normalizeOp(op) {
@@ -209,7 +242,9 @@
     o.address = o.range ? (o.sheet ? o.sheet + "!" + o.range : o.range) : null;
     o.description = String(op.description || "").trim() || defaultDescription(o, op);
     o.cells = o.address ? [o.address] : [];
-    o.cellCount = o.address ? rangeCellCount(o.address) : 0;
+    // Operations without a cell range are structural/object operations, not
+    // zero-cell edits. Infinity prevents them from satisfying size gates.
+    o.cellCount = o.address ? rangeCellCount(o.address) : Infinity;
     o.destructive = destructiveOp(o);
 
     var needsRange = ["setValues", "setFormulas", "clearRange", "insertRows", "deleteRows",
@@ -225,6 +260,8 @@
       o.ok = false; o.error = o.op + " requires a name.";
     } else if (o.op === "renameSheet" && (!o.from || !o.to)) {
       o.ok = false; o.error = "renameSheet requires from and to.";
+    } else if (Number.isFinite(o.cellCount) && o.cellCount > MAX_PREVIEW_CELLS) {
+      o.ok = false; o.error = o.op + " affects " + o.cellCount + " cells; the safety limit is " + MAX_PREVIEW_CELLS + ".";
     }
     return o;
   }
@@ -358,7 +395,10 @@
       range.getCell(0, 0).formulas = [[op.formula]];
       if (dims.columns > 1 && typeof range.getRow === "function") {
         var firstRow = range.getRow(0);
-        if (typeof firstRow.fillRight === "function") firstRow.fillRight();
+        if (typeof firstRow.fillRight === "function") {
+          firstRow.fillRight();
+          if (dims.rows === 1) return;
+        }
       }
       if (dims.rows > 1 && typeof range.fillDown === "function") {
         range.fillDown();
@@ -396,27 +436,24 @@
     return chart;
   }
 
-  /** Read the before-state of every affected range, grouped by sheet. */
+  /** Read bounded before-state for explicitly undo-safe cell operations. */
   async function snapshotCells(Excel, ops) {
     var bySheet = {};
-    var newlyCreated = {};
-    var renamedBack = {};
-    ops.forEach(function (o) {
-      if (o.op === "addSheet" && o.name) newlyCreated[o.name] = true;
-      if (o.op === "renameSheet" && o.from && o.to) renamedBack[o.to] = o.from;
-    });
-    ops.forEach(function (o) {
-      if (!o.range) return;
-      if (newlyCreated[o.sheet]) return; // undo removes the whole new sheet
-      var s = renamedBack[o.sheet] || o.sheet || "__active__";
+    var safeOps = (ops || []).filter(isUndoSafe);
+    var total = safeOps.reduce(function (sum, o) { return sum + o.cellCount; }, 0);
+    if (!Number.isFinite(total) || total > MAX_PREVIEW_CELLS) {
+      throw new Error("Undo snapshot exceeds the " + MAX_PREVIEW_CELLS + "-cell safety limit.");
+    }
+    safeOps.forEach(function (o) {
+      var count = rangeCellCount(o.address || o.range);
+      if (!Number.isFinite(count) || count <= 0 || count > MAX_PREVIEW_CELLS) {
+        throw new Error("Undo snapshot requires an exact range within the " + MAX_PREVIEW_CELLS + "-cell safety limit.");
+      }
+      var s = o.sheet || "__active__";
       if (!bySheet[s]) bySheet[s] = [];
       if (bySheet[s].indexOf(o.range) < 0) bySheet[s].push(o.range);
     });
-    var snap = { sheets: {}, createdSheets: [], renames: [], at: new Date().toISOString() };
-    ops.forEach(function (o) {
-      if (o.op === "addSheet" && o.name) snap.createdSheets.push(o.name);
-      if (o.op === "renameSheet" && o.from && o.to) snap.renames.push({ from: o.from, to: o.to });
-    });
+    var snap = { sheets: {}, at: new Date().toISOString() };
     for (var sheetName in bySheet) {
       var addresses = bySheet[sheetName];
       var data = await Excel.run(async function (ctx) {
@@ -562,19 +599,9 @@
     return results;
   }
 
-  /** Restore values + formulas captured by snapshotCells. */
+  /** Restore cell state captured by snapshotCells. No structural reversal. */
   async function undoSnapshot(Excel, snap) {
     var restored = 0;
-    // Reverse names before restoring cell ranges, then remove sheets created by
-    // the plan. These operations are deterministic and do not depend on Ctrl+Z.
-    for (var ri = (snap.renames || []).length - 1; ri >= 0; ri--) {
-      var rename = snap.renames[ri];
-      await Excel.run(async function (ctx) {
-        ctx.workbook.worksheets.getItem(rename.to).name = rename.from;
-        await ctx.sync();
-      });
-      restored++;
-    }
     for (var sheetName in snap.sheets) {
       var sheet = sheetName;
       await Excel.run(async function (ctx) {
@@ -605,14 +632,6 @@
         restored += wrote;
       });
     }
-    for (var ci = (snap.createdSheets || []).length - 1; ci >= 0; ci--) {
-      var createdName = snap.createdSheets[ci];
-      await Excel.run(async function (ctx) {
-        ctx.workbook.worksheets.getItem(createdName).delete();
-        await ctx.sync();
-      });
-      restored++;
-    }
     return restored;
   }
 
@@ -626,6 +645,8 @@
     undoSnapshot: undoSnapshot,
     defaultDescription: defaultDescription,
     rangeCellCount: rangeCellCount,
+    isUndoSafe: isUndoSafe,
+    canAutoApply: canAutoApply,
     MAX_PREVIEW_CELLS: MAX_PREVIEW_CELLS,
   };
 })(typeof globalThis !== "undefined" ? globalThis : this);

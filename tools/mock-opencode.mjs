@@ -25,6 +25,8 @@ const ANSWER = [
 // When a prompt contains this marker the mock answers with a structured edit
 // plan instead of the canned text answer. Used by tools/test-pane.mjs.
 const PLAN_MARKER = "PLAN_REQUEST";
+const SAFE_PLAN_MARKER = "SAFE_PLAN_REQUEST";
+const DESTRUCTIVE_PLAN_MARKER = "DESTRUCTIVE_PLAN_REQUEST";
 const FALLBACK_MARKER = "FALLBACK_REQUEST";
 const EMPTY_MARKER = "EMPTY_REQUEST";
 const PLAN_ANSWER = "```json\n" +
@@ -34,6 +36,23 @@ JSON.stringify({
     { op: "addSheet", name: "Budget", description: "Add a Budget tab" },
     { op: "setValues", sheet: "Sheet1", range: "A1:B2", values: [["Item","Total"],["Widgets",300]], description: "Rewrite header and data" },
     { op: "formatRange", sheet: "Sheet1", range: "A1:B1", format: { bold: true, fill: "#1F3864" }, description: "Style header" }
+  ]
+}, null, 1) +
+"\n```\n";
+const SAFE_PLAN_ANSWER = "```json\n" +
+JSON.stringify({
+  summary: "Update two cells",
+  operations: [
+    { op: "setValues", sheet: "Sheet1", range: "D5:E5", values: [["Safe","Plan"]], description: "Write two cells" },
+    { op: "formatRange", sheet: "Sheet1", range: "D5:E5", format: { bold: true }, description: "Style two cells" }
+  ]
+}, null, 1) +
+"\n```\n";
+const DESTRUCTIVE_PLAN_ANSWER = "```json\n" +
+JSON.stringify({
+  summary: "Delete a worksheet",
+  operations: [
+    { op: "deleteSheet", name: "Sheet1", description: "Delete Sheet1" }
   ]
 }, null, 1) +
 "\n```\n";
@@ -148,8 +167,13 @@ const server = http.createServer(async (req, res) => {
     lastPromptText = body.text;
     lastPromptFiles = body.files || [];
 
-    if (body.text.includes(PLAN_MARKER)) {
-      assistantText = PLAN_ANSWER;
+    if (body.text.includes(SAFE_PLAN_MARKER) || body.text.includes(DESTRUCTIVE_PLAN_MARKER) ||
+        body.text.includes(PLAN_MARKER)) {
+      assistantText = body.text.includes(SAFE_PLAN_MARKER)
+        ? SAFE_PLAN_ANSWER
+        : body.text.includes(DESTRUCTIVE_PLAN_MARKER)
+          ? DESTRUCTIVE_PLAN_ANSWER
+          : PLAN_ANSWER;
       assistantCreated = Date.now();
       assistantCompleted = Date.now();
       assistantError = null;

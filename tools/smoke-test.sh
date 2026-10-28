@@ -13,11 +13,13 @@ MOCK_PID=$!
 sleep 1.5
 
 echo "== starting bridge on 3000 =="
+BRIDGE_TOKEN=smoke-test-token
 HOME=/tmp/mockhome \
 XDG_STATE_HOME=/tmp/mockhome/.local/state \
 XDG_CONFIG_HOME=/tmp/mockhome/.config \
 OPENCODE_SERVICE_URL=http://127.0.0.1:28894 \
 OPENCODE_SERVICE_PASSWORD=secret \
+BRIDGE_API_TOKEN="$BRIDGE_TOKEN" \
 PORT=3000 node bridge/server.mjs > /tmp/bridge.log 2>&1 &
 BRIDGE_PID=$!
 sleep 3
@@ -34,7 +36,7 @@ echo "== /api/status =="
 curl -sk https://localhost:3000/api/status; echo
 
 echo "== /api/agents =="
-curl -sk https://localhost:3000/api/agents; echo
+curl -sk -H "x-opencode-excel-token: $BRIDGE_TOKEN" https://localhost:3000/api/agents; echo
 
 echo "== static taskpane =="
 curl -sk -o /dev/null -w "taskpane.html -> HTTP %{http_code}\n" https://localhost:3000/taskpane.html
@@ -43,16 +45,19 @@ curl -sk -o /dev/null -w "icon-32.png   -> HTTP %{http_code}\n" https://localhos
 curl -sk -o /dev/null -w "lib.js        -> HTTP %{http_code}\n" https://localhost:3000/lib.js
 
 echo "== POST /api/session =="
-SID=$(curl -sk -X POST https://localhost:3000/api/session -H "content-type: application/json" -d '{}' \
+SID=$(curl -sk -X POST https://localhost:3000/api/session \
+  -H "x-opencode-excel-token: $BRIDGE_TOKEN" -H "content-type: application/json" -d '{}' \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["sessionID"])')
 echo "sessionID=$SID"
 
 echo "== POST /api/prompt =="
-curl -sk -X POST https://localhost:3000/api/prompt -H "content-type: application/json" \
+curl -sk -X POST https://localhost:3000/api/prompt \
+  -H "x-opencode-excel-token: $BRIDGE_TOKEN" -H "content-type: application/json" \
   -d "{\"sessionID\":\"$SID\",\"text\":\"flag duplicates in column B\"}"; echo
 
 echo "== GET /api/events (SSE, 25s max) =="
-curl -sk -N --max-time 25 "https://localhost:3000/api/events?sessionID=$SID" > /tmp/events.log
+curl -sk -N --max-time 25 -H "x-opencode-excel-token: $BRIDGE_TOKEN" \
+  "https://localhost:3000/api/events?sessionID=$SID" > /tmp/events.log
 
 echo "-- event summary --"
 python3 - "$SID" <<'PY'

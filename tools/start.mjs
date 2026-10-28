@@ -112,10 +112,21 @@ function manifestVersion() {
  * starter workbook (and so an already-open source workbook cannot block repair).
  */
 function prepareStarterWorkbook() {
-  if (!isWin || !fs.existsSync(STARTER)) return { ok: false, why: "starter workbook is missing" };
+  if (!fs.existsSync(STARTER)) return { ok: false, why: `starter workbook is missing at ${STARTER}` };
   const id = manifestId();
   const version = manifestVersion();
   if (!id || !version) return { ok: false, why: "manifest id or version could not be read" };
+  // The launcher repairs a copy with PowerShell on Windows. Other platforms do
+  // not launch Excel, but CI can still inspect the packaged workbook directly.
+  if (!isWin) {
+    return {
+      ok: true,
+      skipped: true,
+      path: STARTER,
+      version,
+      why: "runtime workbook preparation is Windows-only; validate the packaged starter directly",
+    };
+  }
 
   const base = process.env.LOCALAPPDATA || process.env.TEMP || ROOT;
   const dir = path.join(base, "OpenCodeExcel", "launcher");

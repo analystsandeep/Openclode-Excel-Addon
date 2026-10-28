@@ -24,6 +24,8 @@ const ROOT = path.resolve(__dirname, "..");
 const SRC = path.join(ROOT, "src");
 const ASSETS = path.join(ROOT, "assets");
 const PORT = Number(process.env.PORT || 3000);
+const BIND_HOST = "127.0.0.1";
+const API_TOKEN = process.env.BRIDGE_API_TOKEN || crypto.randomBytes(32).toString("hex");
 
 let service = { ok: false, url: null, password: null, info: null, source: null, hint: null };
 let workspace = process.cwd();
@@ -242,6 +244,25 @@ function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   res.end(body);
+}
+
+function allowedHost(req) {
+  const host = String(req.headers.host || "").toLowerCase();
+  return host === `localhost:${PORT}` || host === `127.0.0.1:${PORT}`;
+}
+
+function allowedOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true; // non-browser callers still need the API token
+  return origin === `https://localhost:${PORT}` || origin === `https://127.0.0.1:${PORT}` ||
+    origin === `http://localhost:${PORT}` || origin === `http://127.0.0.1:${PORT}`;
+}
+
+function validApiToken(req, url) {
+  const supplied = String(req.headers["x-opencode-excel-token"] || url.searchParams.get("token") || "");
+  const expected = Buffer.from(API_TOKEN);
+  const actual = Buffer.from(supplied);
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
 async function readBody(req, maxBytes = 5 * 1024 * 1024) {
@@ -808,6 +829,15 @@ function serveStatic(req, res, url) {
   }
 
   const ext = path.extname(file).toLowerCase();
+  if (pathname === "/taskpane.html") {
+    const html = fs.readFileSync(file, "utf8").replace("__OPENCODE_EXCEL_BRIDGE_TOKEN__", API_TOKEN);
+    res.writeHead(200, {
+      "content-type": MIME[ext],
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    });
+    return res.end(html);
+  }
   res.writeHead(200, {
     "content-type": MIME[ext] || "application/octet-stream",
     "cache-control": "no-store",
@@ -852,8 +882,13 @@ async function main() {
   fs.mkdirSync(attachmentDir, { recursive: true });
 
   const requestHandler = async (req, res) => {
+    if (!allowedHost(req)) return sendJson(res, 403, { error: "Host is not allowed" });
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     if (url.pathname.startsWith("/api/")) {
+      if (!allowedOrigin(req)) return sendJson(res, 403, { error: "Origin is not allowed" });
+      if (url.pathname !== "/api/status" && !validApiToken(req, url)) {
+        return sendJson(res, 401, { error: "Bridge authentication is required" });
+      }
       try {
         return await handleApi(req, res, url);
       } catch (err) {
@@ -877,7 +912,7 @@ async function main() {
     server = http.createServer(requestHandler);
   }
 
-  server.listen(PORT, "0.0.0.0", async () => {
+  server.listen(PORT, BIND_HOST, async () => {
     console.log(`
   OpenCode for Excel - local bridge
   ---------------------------------

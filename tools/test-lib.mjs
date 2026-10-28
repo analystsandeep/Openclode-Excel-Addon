@@ -103,6 +103,152 @@ check("rangeCellCount handles rectangles", plan.rangeCellCount("Sheet1!B2:D5"), 
 check("range operation requires an exact sheet", plan.normalizeOp({ op: "clearRange", range: "A1" }).ok, false);
 check("expanded operation set is available", ["clearRange", "addTable", "sortRange", "freezePanes"].every((op) => plan.ALLOWED_OPS.includes(op)), true);
 
+// --- safety gates: classification, caps, auto-approval, undo ---------------
+const mergeOp = plan.normalizeOp({ op: "mergeRange", sheet: "Data", range: "A1:B2" });
+check("merge is destructive", mergeOp.destructive, true);
+const sortOp = plan.normalizeOp({ op: "sortRange", sheet: "Data", range: "A1:B2", sort: [] });
+check("sort is destructive", sortOp.destructive, true);
+check("deleteSheet has an unbounded cell count", plan.normalizeOp({ op: "deleteSheet", name: "Data" }).cellCount, Infinity);
+check("deleteTable has an unbounded cell count", plan.normalizeOp({ op: "deleteTable", sheet: "Data", name: "tbl" }).cellCount, Infinity);
+check("deleteChart has an unbounded cell count", plan.normalizeOp({ op: "deleteChart", sheet: "Data", name: "Chart 1" }).cellCount, Infinity);
+
+const safeFormat = plan.normalizeOp({ op: "formatRange", sheet: "Data", range: "A1:B2", format: { bold: true } });
+const smallValues = plan.normalizeOp({ op: "setValues", sheet: "Data", range: "A1", values: [[1]] });
+const namedFormat = plan.normalizeOp({ op: "formatRange", sheet: "Data", range: "MyRange", format: { bold: true } });
+check("small safe formatting can auto-apply", plan.canAutoApply([safeFormat], 5), true);
+check("formatting above the auto limit is not auto-applied", plan.canAutoApply([safeFormat], 3), false);
+check("cell writes always require review", plan.canAutoApply([smallValues], 5000), false);
+check("sheet creation is never auto-applied", plan.canAutoApply([plan.normalizeOp({ op: "addSheet", name: "New" })], 5000), false);
+check("sheet deletion is never auto-applied", plan.canAutoApply([plan.normalizeOp({ op: "deleteSheet", name: "Data" })], 5000), false);
+check("table deletion is never auto-applied", plan.canAutoApply([plan.normalizeOp({ op: "deleteTable", sheet: "Data", name: "tbl" })], 5000), false);
+check("chart deletion is never auto-applied", plan.canAutoApply([plan.normalizeOp({ op: "deleteChart", sheet: "Data", name: "Chart 1" })], 5000), false);
+check("named ranges have unbounded cell counts", namedFormat.cellCount, Infinity);
+check("named ranges are not auto-applied", plan.canAutoApply([namedFormat], 5000), false);
+
+const oversizedPlanText = JSON.stringify({
+  summary: "big",
+  operations: [{ op: "setValues", sheet: "Data", range: "A1:Z100000", values: [[1]] }],
+});
+const oversizedPlan = plan.parsePlan(oversizedPlanText);
+check("oversized ranges are rejected during parsing", oversizedPlan.ok, false);
+check("oversized range error names the cell limit", /5000/.test(oversizedPlan.error || ""), true);
+
+check("cell writes are add-in undo-safe", plan.isUndoSafe(smallValues), true);
+check("sheet creation is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp({ op: "addSheet", name: "New" })), false);
+check("clearing is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp({ op: "clearRange", sheet: "Data", range: "A1" })), false);
+check("row insertion is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp({ op: "insertRows", sheet: "Data", at: 2, count: 1 })), false);
+
+check("whole-column ranges are unbounded", plan.rangeCellCount("Data!A:C"), Infinity);
+check("whole-row ranges are unbounded", plan.rangeCellCount("Data!1:3"), Infinity);
+check("named ranges are unbounded", plan.rangeCellCount("Data!MyRange"), Infinity);
+
+function makeSheet(name) {
+  return {
+    name: name,
+    deleted: false,
+    getRange: function (address) {
+      return {
+        values: [[name + "!" + address]],
+        formulas: [[name + "!" + address]],
+        numberFormat: [["General"]],
+        format: {
+          horizontalAlignment: "General", verticalAlignment: "Bottom",
+          wrapText: false, rowHeight: 15, columnWidth: 8.43,
+          font: { bold: false, italic: false, size: 11, color: "#000000" },
+          fill: { color: "#FFFFFF" },
+          load: function () {},
+        },
+        load: function () {},
+      };
+    },
+    delete: function () { this.deleted = true; },
+  };
+}
+
+function makeExcel(sheets) {
+  return {
+    run: async function (fn) {
+      return fn({
+        workbook: {
+          worksheets: {
+            getActiveWorksheet: function () { return sheets[0]; },
+            getItem: function (name) {
+              var found = sheets.filter(function (s) { return s.name === name; })[0];
+              if (!found) throw new Error("sheet not found");
+              return found;
+            },
+          },
+        },
+        sync: async function () {},
+      });
+    },
+  };
+}
+
+const existingSheet = makeSheet("Existing");
+const dataSheet = makeSheet("Data");
+const snapshotExcel = makeExcel([dataSheet, existingSheet]);
+const failedCreateOps = [
+  plan.normalizeOp({ op: "addSheet", name: "Existing" }),
+  plan.normalizeOp({ op: "setValues", sheet: "Data", range: "A1", values: [[42]] }),
+];
+const snapshot = await plan.snapshotCells(snapshotExcel, failedCreateOps);
+check("snapshot excludes sheet creation", Object.keys(snapshot.sheets), ["Data"]);
+check("snapshot has no created-sheet list", snapshot.createdSheets, undefined);
+await plan.undoSnapshot(snapshotExcel, snapshot);
+check("undo never deletes a pre-existing sheet", existingSheet.deleted, false);
+
+const liedOp = {
+  op: "setValues", sheet: "Data", range: "A1:F1000", address: "Data!A1:F1000",
+  cellCount: 1, destructive: true, ok: true,
+};
+let capError = null;
+try { await plan.snapshotCells(snapshotExcel, [liedOp]); } catch (err) { capError = err; }
+check("snapshot re-checks the real range size", !!capError && /safety limit/.test(capError.message), true);
+
+var formulaAssignments = [];
+var formulaState = null;
+var formulaHandle = {
+  getCell: function () {
+    return {
+      set formulas(value) { formulaAssignments.push(["seed", value]); },
+    };
+  },
+  getRow: function () {
+    return {
+      fillRight: function () {
+        formulaAssignments.push(["fillRight"]);
+        formulaState = [["=A2", "=B2", "=C2"]];
+      },
+    };
+  },
+  get formulas() { return formulaState; },
+  set formulas(value) { formulaAssignments.push(["range", value]); formulaState = value; },
+};
+var formulaSheet = { getRange: function () { return formulaHandle; } };
+var formulaExcel = {
+  run: async function (fn) {
+    return fn({
+      workbook: {
+        worksheets: {
+          getActiveWorksheet: function () { return formulaSheet; },
+          getItem: function () { return formulaSheet; },
+        },
+      },
+      sync: async function () {},
+    });
+  },
+};
+const formulaOp = plan.normalizeOp({ op: "setFormulas", sheet: "Sheet1", range: "A1:C1", formula: "=A2" });
+const formulaResults = await plan.applyOps(formulaExcel, [formulaOp]);
+check("horizontal formula fill succeeds", formulaResults[0].ok, true);
+check("fillRight translated formula is retained", formulaState, [["=A2", "=B2", "=C2"]]);
+check(
+  "fillRight is not overwritten by a matrix",
+  formulaAssignments.filter(function (item) { return item[0] === "range"; }).length,
+  0
+);
+
 // --- sheet formatter helpers ------------------------------------------------
 check(
   "cleanHeaders fixes the SaleData headers",

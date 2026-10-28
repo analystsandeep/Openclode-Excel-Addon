@@ -1,15 +1,16 @@
 /* OpenCode for Excel - task pane logic (agentic edition).
  *
- * Talks only to the local bridge (same origin: https://localhost:3000), so there
- * is no CORS or Basic-auth handling in the browser. The bridge discovers the
- * OpenCode service and streams events back over SSE.
+ * Talks only to the local bridge (same origin) using the token the bridge
+ * injects into this page. The bridge discovers the OpenCode service and streams
+ * events back over SSE.
  *
  * Agentic model: when the user asks to CHANGE the workbook, OpenCode is asked to
  * reply with a JSON edit plan (see src/plan.js). The pane shows a change preview
  * with cell-level references, the user approves individual operations, and they
- * are executed through Office.js. Office.js edits enter Excel's own undo stack
- * (Ctrl+Z always works) and the pane additionally keeps before-snapshots so it
- * can offer an "Undo last change" button.
+ * are executed through Office.js. The pane keeps bounded before-snapshots for
+ * cell-only operations so it can offer an "Undo last change" button. Structural
+ * and object operations are not presented as add-in-undoable; use Excel's own
+ * Undo or a backup for those.
  */
 
 (function () {
@@ -149,8 +150,18 @@
 
   /* ---------------------------------------------------------------- bridge */
 
+  function bridgeToken() {
+    var meta = document.querySelector('meta[name="opencode-excel-bridge-token"]');
+    return meta ? String(meta.getAttribute("content") || "") : "";
+  }
+
   async function api(pathname, options) {
-    var res = await fetch(pathname, Object.assign({ headers: { "content-type": "application/json" } }, options));
+    options = options || {};
+    var headers = Object.assign({
+      "content-type": "application/json",
+      "x-opencode-excel-token": bridgeToken()
+    }, options.headers || {});
+    var res = await fetch(pathname, Object.assign({}, options, { headers: headers }));
     var json = null;
     try { json = await res.json(); } catch (err) { /* non-JSON */ }
     if (!res.ok) throw new Error((json && json.error) || ("HTTP " + res.status));
@@ -193,7 +204,8 @@
   function openStream() {
     if (state.source) state.source.close();
     if (!state.sessionID) return;
-    state.source = new EventSource("/api/events?sessionID=" + encodeURIComponent(state.sessionID));
+    state.source = new EventSource("/api/events?sessionID=" + encodeURIComponent(state.sessionID) +
+      "&token=" + encodeURIComponent(bridgeToken()));
     state.source.onmessage = function (event) {
       var payload;
       try { payload = JSON.parse(event.data); } catch (err) { return; }
@@ -405,8 +417,9 @@
       state.currentPlan = parsedPlan;
       state.planJson = JSON.stringify(parsedPlan.raw, null, 2);
       renderPlanPreview(parsedPlan, wantsPlanThisTurn);
-      if (!state.readOnly && (state.approvalMode === "never" ||
-          (state.approvalMode === "auto" && parsedPlan.cellCount !== Infinity && parsedPlan.cellCount <= 5))) {
+      var autoLimit = state.approvalMode === "auto" ? 5 : plan.MAX_PREVIEW_CELLS;
+      if (!state.readOnly && state.approvalMode !== "always" &&
+          plan.canAutoApply(parsedPlan.operations, autoLimit)) {
         setTimeout(function () { applyCore(parsedPlan.operations); }, 0);
       }
     } else if (answerText) {
@@ -485,7 +498,7 @@
 
       var cb = document.createElement("input");
       cb.type = "checkbox";
-      cb.checked = (!op.destructive || state.approvalMode === "never") && !state.readOnly;
+      cb.checked = !op.destructive && !state.readOnly;
       if (state.readOnly) cb.disabled = true;
       cb._opIndex = index;
 
@@ -560,8 +573,21 @@
     if (state.readOnly) return banner("Read-only mode is on — changes cannot be applied.", "warn");
 
     var summary = (state.currentPlan && state.currentPlan.summary) || "Workbook changes";
-    var snap;
-    try { snap = await plan.snapshotCells(Excel, ops); } catch (err) { return banner("Could not snapshot before state: " + err.message, "err"); }
+    var snapshotOps = ops.filter(function (op) { return plan.isUndoSafe(op); });
+    var snapshotTotal = snapshotOps.reduce(function (sum, op) { return sum + op.cellCount; }, 0);
+    var snapshotEligible = snapshotOps.length > 0 && Number.isFinite(snapshotTotal) &&
+      snapshotTotal <= plan.MAX_PREVIEW_CELLS &&
+      snapshotOps.every(function (op) { return op.cellCount > 0 && op.cellCount <= plan.MAX_PREVIEW_CELLS; });
+    var snap = null;
+    var snapshotError = null;
+    if (snapshotEligible) {
+      try { snap = await plan.snapshotCells(Excel, snapshotOps); }
+      catch (err) {
+        // The reviewed apply is still legitimate; it just cannot offer the
+        // add-in's cell-level Undo entry. Keep the reason for the final summary.
+        snapshotError = err.message;
+      }
+    }
 
     var results;
     try { results = await plan.applyOps(Excel, ops); } catch (err) { return banner("Apply failed: " + err.message, "err"); }
@@ -571,12 +597,30 @@
     var okCount = results.filter(function (r) { return r.ok; }).length;
     var failed = results.filter(function (r) { return !r.ok; });
 
-    if (okCount > 0) state.undoStack.push({ snap: snap, ops: ops, at: Date.now(), summary: summary });
-    if (state.undoStack.length > 8) state.undoStack.shift();
+    var successfulOps = ops.filter(function (op, index) { return results[index] && results[index].ok; });
+    var addinUndoable = successfulOps.length > 0 && !!snap && successfulOps.every(function (op) {
+      return plan.isUndoSafe(op);
+    });
+    if (addinUndoable) {
+      state.undoStack.push({ snap: snap, ops: successfulOps, at: Date.now(), summary: summary });
+      if (state.undoStack.length > 8) state.undoStack.shift();
+    } else if (successfulOps.length) {
+      // A structural/object edit can invalidate every older cell snapshot by
+      // shifting or removing its target. Discard stale entries rather than
+      // offering an Undo button that may restore the wrong cells.
+      state.undoStack = [];
+    }
 
     hidePreview();
-    showUndoRow(okCount, results.length);
-    banner("Applied " + okCount + "/" + results.length + " change(s)" + (failed.length ? " · " + failed.length + " failed" : ""), okCount === results.length ? "ok" : "warn");
+    if (addinUndoable) showUndoRow(okCount, results.length);
+    else hideUndoRow();
+    var notice = "Applied " + okCount + "/" + results.length + " change(s)" +
+      (failed.length ? " · " + failed.length + " failed" : "");
+    if (successfulOps.length && !addinUndoable) {
+      notice += " · Add-in Undo is unavailable for this plan; use Excel Undo or a backup.";
+      if (snapshotError) notice += " (snapshot failed: " + snapshotError + ")";
+    }
+    banner(notice, okCount === results.length && addinUndoable ? "ok" : "warn");
     audit("apply", { summary: summary, operations: ops, results: results });
     return results;
   }
@@ -605,16 +649,17 @@
   }
 
   async function undoLast() {
-    var entry = state.undoStack.pop();
+    var entry = state.undoStack[state.undoStack.length - 1];
     if (!entry) return banner("Nothing to undo.", "warn");
     if (!inExcel()) return banner("Open this pane inside Excel to undo changes.", "warn");
     try {
       var restored = await plan.undoSnapshot(Excel, entry.snap);
+      state.undoStack.pop();
       await refreshContext();
-      banner("Undid " + restored + " changed range(s) from \"" + escapeHtml(entry.summary) + "\".", "ok");
+      banner("Undid " + restored + " changed range(s) from \"" + entry.summary + "\".", "ok");
       audit("undo", { summary: entry.summary, operations: entry.ops });
     } catch (err) {
-      banner("Undo failed: " + err.message, "err");
+      banner("Undo failed: " + err.message + " You can retry; the undo entry was kept.", "err");
     }
     if (!state.undoStack.length) hideUndoRow();
   }
@@ -865,8 +910,22 @@
     var range = rangeFromStart(a1, rows.length, rows[0].length);
     var valuesOp = plan.normalizeOp({ op: "setValues", sheet: state.context.sheet, range: range, values: rows, description: "Insert the answer as a table." });
     var fitOp = plan.normalizeOp({ op: "autofitRange", sheet: state.context.sheet, range: range, description: "Autofit the inserted table." });
-    state.currentPlan = { summary: "Insert table", operations: [valuesOp, fitOp], cellCount: valuesOp.cellCount };
-    return applyCore([valuesOp, fitOp]);
+    state.currentPlan = { summary: "Insert table", operations: [valuesOp], cellCount: valuesOp.cellCount };
+    var result = await applyCore([valuesOp]);
+    if (result) {
+      // Autofit is cosmetic. Run it separately so it cannot make the inserted
+      // values appear non-undoable, and do not let a width failure mask a
+      // successful insert.
+      try {
+        var fitResults = await plan.applyOps(Excel, [fitOp]);
+        if (fitResults[0] && !fitResults[0].ok) {
+          banner("Inserted the table, but autofit failed: " + fitResults[0].error, "warn");
+        }
+      } catch (err) {
+        banner("Inserted the table, but autofit failed: " + err.message, "warn");
+      }
+    }
+    return result;
   }
 
   async function insertFormula(formula) {

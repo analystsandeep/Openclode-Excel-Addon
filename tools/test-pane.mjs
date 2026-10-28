@@ -22,6 +22,7 @@ const BRIDGE_PORT = process.env.TEST_BRIDGE_PORT || "3100";
 const MOCK_PORT = process.env.TEST_MOCK_PORT || "28895";
 const BASE = `https://localhost:${BRIDGE_PORT}`;
 const HOME = "/tmp/panetest-home";
+const BRIDGE_TOKEN = "pane-test-token";
 
 let failures = 0;
 const check = (name, actual, expected) => {
@@ -107,6 +108,7 @@ function createFakeExcel() {
     load() {},
     set name(v) { ops.push({ kind: "renameSheet", from: "Sheet1", to: v }); this._name = v; },
     get name() { return this._name || "Sheet1"; },
+    delete() { ops.push({ kind: "deleteSheet", name: "Sheet1" }); },
     add: undefined,
   };
 
@@ -122,6 +124,7 @@ function createFakeExcel() {
     load() {},
     set name(v) { ops.push({ kind: "renameSheet", from: "Sheet2", to: v }); this._name = v; },
     get name() { return this._name || "Sheet2"; },
+    delete() { ops.push({ kind: "deleteSheet", name: "Sheet2" }); },
   };
 
   sheet.add = function (name) {
@@ -140,6 +143,7 @@ function createFakeExcel() {
   // Before-state the formatter/snapshot reads back for the undo test.
   cellStore["A1:B1"] = { values: [["Name", "Amount"]] };
   cellStore["A1:B2"] = { values: [["Name", "Amount"], ["ACME", 10]] };
+  cellStore["D5:E5"] = { values: [["Before", "State"]], formulas: [["Before", "State"]] };
 
   const worksheets = {
     items: [sheet, sheet2],
@@ -238,6 +242,7 @@ async function main() {
       XDG_CONFIG_HOME: path.join(HOME, ".config"),
       OPENCODE_SERVICE_URL: `http://127.0.0.1:${MOCK_PORT}`,
       OPENCODE_SERVICE_PASSWORD: "secret",
+      BRIDGE_API_TOKEN: BRIDGE_TOKEN,
       PORT: BRIDGE_PORT,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -255,6 +260,7 @@ async function main() {
     const html = fs.readFileSync(path.join(ROOT, "src", "taskpane.html"), "utf8");
     const dom = new JSDOM(html, { runScripts: "outside-only", url: BASE + "/taskpane.html" });
     const { window } = dom;
+    window.document.querySelector('meta[name="opencode-excel-bridge-token"]').setAttribute("content", BRIDGE_TOKEN);
 
     const fake = createFakeExcel();
     window.Excel = fake.Excel;
@@ -465,13 +471,65 @@ async function main() {
     check("addSheet was executed", addSheetOp && addSheetOp.name, "Budget");
     const valuesOp = fake.ops.filter((o) => o.kind === "values" && o.a1 === "A1:B2").pop();
     check("setValues was executed", valuesOp && JSON.stringify(valuesOp.values), JSON.stringify([["Item", "Total"], ["Widgets", 300]]));
-    ok("undo row is shown", !window.document.getElementById("undoRow").classList.contains("hidden"));
+    ok("structural plan does not offer misleading add-in undo", window.document.getElementById("undoRow").classList.contains("hidden"));
+    ok(
+      "structural apply directs the user to Excel Undo or a backup",
+      /Add-in Undo is unavailable/.test(window.document.getElementById("banner").textContent),
+      window.document.getElementById("banner").textContent
+    );
+
+    /* --- cell-only plan: add-in undo works and is honest --------------- */
+    console.log("\n-- cell-only plan undo --");
+    planInput.value = "SAFE_PLAN_REQUEST: update two cells";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    const safeRows = Array.from(window.document.querySelectorAll(".op-row"));
+    check("safe plan has 2 rows", safeRows.length, 2);
+    const safeCb = (i) => safeRows[i].querySelector("input[type=checkbox]");
+    ok("safe cell write is not pre-checked", !safeCb(0).checked, "cb0: " + safeCb(0).checked);
+    ok("safe formatting is pre-checked", !!safeCb(1).checked, "cb1: " + safeCb(1).checked);
+    safeCb(0).click();
+    window.document.getElementById("btnApplyPlan").click();
+    await sleep(500);
+    const safeWrite = fake.ops.filter((o) => o.kind === "values" && o.a1 === "D5:E5").pop();
+    check("safe plan wrote two cells", safeWrite && safeWrite.values, [["Safe", "Plan"]]);
+    ok("cell-only plan offers add-in undo", !window.document.getElementById("undoRow").classList.contains("hidden"));
 
     window.document.getElementById("btnUndo").click();
     await sleep(500);
-    const restored = fake.ops.filter((o) => o.kind === "values" && o.a1 === "A1:B2").pop();
-    check("undo restores previous values", restored && JSON.stringify(restored.values), JSON.stringify([["Name", "Amount"], ["ACME", 10]]));
-    ok("undo remains available for earlier direct inserts", !window.document.getElementById("undoRow").classList.contains("hidden"));
+    const safeRestored = fake.ops.filter((o) => o.kind === "values" && o.a1 === "D5:E5").pop();
+    check("add-in undo restores the cell before-state", safeRestored && safeRestored.values, [["Before", "State"]]);
+    ok("undo row hides after the stack empties", window.document.getElementById("undoRow").classList.contains("hidden"));
+
+    /* --- auto-approval must never run destructive operations ----------- */
+    console.log("\n-- destructive auto-approval guard --");
+    const approvalSelect = window.document.getElementById("selApproval");
+    approvalSelect.value = "auto";
+    approvalSelect.dispatchEvent(new window.Event("change"));
+    const deletesBefore = fake.ops.filter((o) => o.kind === "deleteSheet").length;
+    const bannerBeforeDestructive = window.document.getElementById("banner").textContent;
+    planInput.value = "DESTRUCTIVE_PLAN_REQUEST: delete a sheet";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    ok("destructive plan is shown for review in auto mode", !window.document.getElementById("previewPanel").classList.contains("hidden"));
+    const destructiveRows = Array.from(window.document.querySelectorAll(".op-row"));
+    ok("deleteSheet is not pre-checked", destructiveRows.length === 1 && !destructiveRows[0].querySelector("input[type=checkbox]").checked);
+    check("auto mode did not delete the sheet", fake.ops.filter((o) => o.kind === "deleteSheet").length, deletesBefore);
+    ok(
+      "auto mode did not report the plan as applied",
+      window.document.getElementById("banner").textContent === bannerBeforeDestructive,
+      window.document.getElementById("banner").textContent
+    );
+
+    approvalSelect.value = "never";
+    approvalSelect.dispatchEvent(new window.Event("change"));
+    planInput.value = "DESTRUCTIVE_PLAN_REQUEST: delete a sheet again";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    check("never mode also refuses destructive auto-approval", fake.ops.filter((o) => o.kind === "deleteSheet").length, deletesBefore);
+    ok("never-mode destructive plan is shown for review", !window.document.getElementById("previewPanel").classList.contains("hidden"));
+    approvalSelect.value = "always";
+    approvalSelect.dispatchEvent(new window.Event("change"));
 
     /* --- read-only blocks apply --- */
     console.log("\n-- read-only --");
@@ -542,7 +600,7 @@ async function main() {
     ok("stop finalizes the turn", window.document.getElementById("btnSend").disabled === false);
     const assistantCount = window.document.querySelectorAll(".msg.assistant .bubble").length;
     const lastAssistant = Array.from(window.document.querySelectorAll(".msg.assistant .bubble")).pop();
-    check("stop leaves a finalised bubble (9 turns)", assistantCount, 9);
+    check("stop leaves a finalised bubble (12 turns)", assistantCount, 12);
     ok("stopped bubble is not left thinking", !lastAssistant.innerHTML.includes("Thinking"), lastAssistant.innerHTML.slice(0, 60));
 
     window.document.getElementById("btnNewChat").click();

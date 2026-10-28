@@ -19,7 +19,7 @@ one-click launcher without requiring terminal commands.
 - Generate Excel formulas, summaries, variance analysis, scenarios, and dashboard layouts.
 - Review workbook edits before applying them, with exact sheet and range references.
 - Apply values, formulas, formatting, tables, charts, row and column operations, and sheet changes.
-- Restore recent changes with local snapshots and Excel undo support.
+- Restore recent cell-only changes with local snapshots; use Excel's own Undo for structural edits.
 - Attach documents, images, spreadsheets, CSV files, and text files through OpenCode V2.
 - Use OpenCode models, agents, skills, MCP connections, and provider settings.
 - Retry unavailable models with a verified free OpenCode fallback without selecting paid providers.
@@ -141,11 +141,13 @@ workbooks for the rest of the Excel session. To remove the add-in later:
   charts), it replies with a **change plan** instead of plain text. The plan lists every
   operation with the exact cells/tabs it touches, so you can review before anything is written.
   Uncheck operations you don't want, then click **Apply checked changes**. A before-snapshot is
-  kept so you can click **Undo** afterwards (Excel's own Ctrl+Z also reverts Office.js edits).
+  kept for cell edits so you can click **Undo** afterwards; structural and object operations are
+  not add-in-undoable, so use Excel's own Undo or a backup for those.
 * **Read-only mode** - the three-dot settings menu lets you ask questions and audit without any
   workbook edits being possible (apply buttons are disabled).
 * **Approval gates** - use the three-dot settings menu to choose *Ask before every change* (default), *Auto-apply
-  changes touching 5 or fewer cells*, or *Never ask*.
+  safe formatting touching 5 or fewer cells*, or *Auto-apply safe formatting*. Destructive and
+  structural operations are always unchecked and never auto-applied.
 * **Quick actions** - *Explain formula*, *Fix formula*, *Write formula*, *Clean this data*,
   *Summarize as table*, *Audit workbook*, *Variance analysis*, *Scenario tabs*, *Dashboard*,
   *New sheet*, *Web research*, *Write VBA*, *Pivot advice*.
@@ -184,6 +186,11 @@ Sessions created by this add-in run in a scratch workspace
 }
 ```
 
+The bridge listens only on `127.0.0.1`, rejects unexpected `Host` and browser `Origin` headers,
+and requires a per-launch token for every API except the health/status probe. The task pane
+receives that token from the bridge's own HTML response, so no credential is committed to the
+repository.
+
 Add a dedicated agent so the dropdown offers an Excel-tuned, read-only assistant.
 Paste this into `%USERPROFILE%\.config\opencode\opencode.jsonc`:
 
@@ -211,9 +218,11 @@ Then pick **excel** under *Agent* in the three-dot settings menu. Config referen
 | Setting | Where | Default |
 |---|---|---|
 | Bridge port | `PORT` env var | `3000` |
+| Bridge bind address | fixed at loopback | `127.0.0.1` |
+| Bridge API token | `BRIDGE_API_TOKEN` env var, else generated per launch and injected into the pane | random, 32 bytes |
 | Service URL | `OPENCODE_SERVICE_URL` env var, else service registration file | auto-discovered |
 | Service password | `OPENCODE_SERVICE_PASSWORD` env var, else registration/config file | auto-discovered |
-| Allowed browser origin | `opencode service set cors https://localhost:3000` | not needed — the bridge is same-origin |
+| Allowed browser origin | checked by the bridge | same-origin `localhost` / `127.0.0.1` only |
 | Cells sent per request | Three-dot settings menu, *Max cells sent* | `400` |
 | Read-only mode | Three-dot settings menu, *Read-only mode* | off |
 | Approval gates | Three-dot settings menu, *Approval gates* | *Ask before every change* |
@@ -287,10 +296,10 @@ values and formulas (including R1C1 fills), clearing, rows/columns, sheets, rich
 autofit, merge/unmerge, tables, sorting, charts, and freeze panes. Every range operation must name
 the exact sheet and range it touches.
 
-1. **Review** — the pane renders the plan as a change preview with cell-level references. Destructive operations (overwrites, deletes, inserts that shift data) are unchecked by default under *Ask before every change*.
-2. **Approve** — check the operations you want and click **Apply checked changes**. The pane snapshots before-values, then applies the operations through Office.js.
+1. **Review** — the pane renders the plan as a change preview with cell-level references. Destructive operations (overwrites, deletes, inserts that shift data, merges, sorts) are unchecked by default and are never auto-applied.
+2. **Approve** — check the operations you want and click **Apply checked changes**. The pane snapshots bounded before-values for cell-only operations, then applies the operations through Office.js.
 3. **Audit** - every prompt, plan and apply is appended to `workspace/audit.log` and can be viewed from the settings menu.
-4. **Undo** — click **Undo** to restore the before-snapshot; Excel's own Ctrl+Z also reverts Office.js edits.
+4. **Undo** — **Undo** restores only cell values, formulas, and basic formatting from the add-in snapshot. Row/column/sheet/table/chart operations are not structurally reversed; use Excel's Ctrl+Z or restore a backup for those.
 
 ## 10. Verifying without OpenCode
 

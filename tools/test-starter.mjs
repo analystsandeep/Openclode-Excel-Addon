@@ -23,7 +23,8 @@ const prepared = spawnSync(process.execPath, [path.join(root, "tools", "start.mj
 });
 let result = null;
 try { result = JSON.parse((prepared.stdout || "").trim()); } catch {}
-ok("launcher prepares a runtime workbook", prepared.status === 0 && result?.ok && fs.existsSync(result.path), prepared.stderr || prepared.stdout);
+ok("launcher provides a starter workbook", prepared.status === 0 && result?.ok && fs.existsSync(result.path), prepared.stderr || prepared.stdout);
+if (result?.skipped) console.log(`  (runtime preparation skipped: ${result.why})`);
 
 let xml = "";
 if (result?.path) {
