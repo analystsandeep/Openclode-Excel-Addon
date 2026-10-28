@@ -140,6 +140,23 @@ workbooks for the rest of the Excel session. To remove the add-in later:
   cells and does not turn workbook samples off. Both choices are remembered. Workbook and
   selection context are each capped at 30,000 characters; long cells are clipped and the prompt
   notes when data was truncated.
+* **Read a specific range** - include `@range(Sheet1!A1:B20)` in your message, or use
+  `@range('Sales Data'!A1:B20)` for a quoted sheet name. The task pane reads the requested
+  values and formulas and sends them with your prompt to OpenCode and its selected provider.
+  Up to three finite ranges and 500 cells total are allowed, with a 12,000-character content
+  limit. Requests exceeding a limit are rejected before the prompt is sent. This is an explicit
+  user-directed read. Normal workbook samples may still be included even when the selection
+  checkbox is off. OpenCode can also return an exact range request; the pane shows the requested
+  sheets/ranges and requires **Approve read & continue** before reading and sending them. There
+  are at most two approved model-requested reads per user turn, each subject to the same caps.
+  A model may not reliably use this optional protocol; a declined request is not sent.
+* **Search and trace** - `@search("rent")` performs a literal case-insensitive values/formulas
+  search across used ranges (maximum 20 sheets and 5,000 cells); at most 50 matches, with
+  truncated cell text, are sent to OpenCode. An oversized workbook is rejected rather than
+  searched partially. `@trace(Sheet1!C5)` requests direct in-workbook precedents and dependents
+  for one cell (at most two traces and 12,000 characters). Precedents require ExcelApi 1.12,
+  dependents 1.13; unsupported hosts are reported. Neither feature traverses external workbooks
+  or builds a complete dependency graph. Results and normal context are sent to the provider.
 * **Model** - the model selector lists every model your OpenCode app exposes. The choice is remembered
   and applied to the next message; *Default* lets OpenCode pick.
 * **Agentic edits (change plans)** - when you ask OpenCode to change the workbook
@@ -151,6 +168,24 @@ workbooks for the rest of the Excel session. To remove the add-in later:
   afterwards. Multi-cell formatting, borders, row heights, column widths, autofit, and
   structural/object operations are not add-in-undoable, so use Excel's own Undo or a backup for
   those.
+* **Cell review and drift checks** - for plans composed entirely of supported, bounded cell
+  writes and single-cell, cell-local formatting, the pane shows up to 50 original/proposed cell
+  contents and checks selected cells again before apply. If they changed, apply is blocked and
+  the plan must be reviewed again. The add-in also compares supported cells against their
+  post-apply state before Undo and blocks Undo if later edits are detected. These are
+  best-effort checks, **not atomic transactions**; changes can still occur between a check and
+  a write. Mixed, structural, unsupported and auto-applied operations do not have the same
+  pre-apply review guard. Formula-fill previews display the seed, not calculated formulas.
+  Edited JSON plans must be reviewed before applying.
+* **Post-write checks** - supported bounded writes are read back and compared with exact values
+  or explicit A1 formulas. Excel error cells are flagged using their value type, not error-like
+  strings. Relative fills, overlapping/multiple same-sheet operations, formatting and unsupported
+  plans remain unverified; this does not prove formula logic or calculated results are correct.
+* **Manual backup** - in plan review, **Prepare backup** requests a compressed workbook copy from
+  Office, capped at 50 MB, then provides a local download link. Availability varies by host;
+  Excel on the web/iPad may not support compressed output. No backup is sent to OpenCode and
+  there is no automatic restore. Open and verify the downloaded file and its extension/macros;
+  if unavailable use Excel Save a Copy or version history. The copy is not a transactional snapshot.
 * **Read-only mode** - the three-dot settings menu lets you ask questions and audit without any
   workbook edits being possible (apply buttons are disabled).
 * **Approval gates** - use the three-dot settings menu to choose *Ask before every change* (default), *Auto-apply

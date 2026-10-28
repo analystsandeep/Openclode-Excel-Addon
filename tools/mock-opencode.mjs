@@ -176,6 +176,13 @@ const server = http.createServer(async (req, res) => {
     lastPromptText = body.text;
     lastPromptFiles = body.files || [];
 
+    if (body.text.includes("RANGE_READ_REQUEST")) {
+      assistantText = JSON.stringify({read_ranges:[{sheet:"Sheet2",range:"A1:B2"}],reason:"Need details outside the sample"});
+      assistantCreated = Date.now(); assistantCompleted = Date.now(); assistantError = null; phase = 0;
+      broadcast({ type: "session.idle", properties: { sessionID: SESSION, status: "idle" } });
+      return send(res, 200, { data: { admitted: true } });
+    }
+
     if (body.text.includes(SAFE_PLAN_MARKER) || body.text.includes(BORDER_PLAN_MARKER) ||
         body.text.includes(DESTRUCTIVE_PLAN_MARKER) || body.text.includes(PLAN_MARKER)) {
       assistantText = body.text.includes(SAFE_PLAN_MARKER)

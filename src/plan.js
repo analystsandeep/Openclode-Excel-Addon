@@ -192,6 +192,12 @@
       spanCount = requested;
     }
 
+    var axisLimit = isRow ? 1048576 : 16384;
+    if (!Number.isInteger(start) || start < (isRow ? 1 : 0) ||
+        start + spanCount - 1 > (isRow ? axisLimit : axisLimit - 1)) {
+      return { error: o.op + " exceeds the worksheet " + label + " boundary." };
+    }
+
     if (isRow) {
       return {
         range: start + ":" + (start + spanCount - 1),
@@ -358,7 +364,8 @@
     if (o.op === "addChart" && !o.range) o.range = o.source;
     if (o.op === "addTable" && !o.range) o.range = op.source || null;
     o.address = o.range ? (o.sheet ? o.sheet + "!" + o.range : o.range) : null;
-    o.description = String(op.description || "").trim() || defaultDescription(o, op);
+    o.description = /^(insertRows|deleteRows|insertColumns|deleteColumns)$/.test(o.op)
+      ? defaultDescription(o, op) : (String(op.description || "").trim() || defaultDescription(o, op));
     o.cells = o.address ? [o.address] : [];
     // Operations without a cell range are structural/object operations, not
     // zero-cell edits. Infinity prevents them from satisfying size gates.
@@ -449,11 +456,9 @@
 
   function resolveSheet(ctx, name) {
     if (!name) return ctx.workbook.worksheets.getActiveWorksheet();
-    try {
-      return ctx.workbook.worksheets.getItem(name);
-    } catch (err) {
-      return ctx.workbook.worksheets.getActiveWorksheet();
-    }
+    // Fail closed: a missing or invalid sheet must never redirect writes to
+    // whichever worksheet happens to be active.
+    return ctx.workbook.worksheets.getItem(name);
   }
 
   function applyFormat(range, fmt) {
@@ -559,7 +564,7 @@
    */
   function snapshotRequirements(op) {
     if (op.op === "setValues" || op.op === "setFormulas") {
-      return { values: true, formulas: true };
+      return { values: true, formulas: true, valueTypes: true };
     }
     if (op.op === "formatRange" && op.cellCount === 1 && formatHasOnlyCellLocalProperties(op)) {
       return { format: true };
@@ -584,10 +589,11 @@
       if (!needs) return;
       var s = o.sheet || "__active__";
       if (!bySheet[s]) bySheet[s] = {};
-      if (!bySheet[s][o.range]) bySheet[s][o.range] = { values: false, formulas: false, format: false };
+      if (!bySheet[s][o.range]) bySheet[s][o.range] = { values: false, formulas: false, valueTypes: false, format: false };
       var entry = bySheet[s][o.range];
       if (needs.values) entry.values = true;
       if (needs.formulas) entry.formulas = true;
+      if (needs.valueTypes) entry.valueTypes = true;
       if (needs.format) entry.format = true;
     });
     var snap = { sheets: {}, at: new Date().toISOString() };
@@ -605,6 +611,7 @@
             var load = [];
             if (need.values) load.push("values");
             if (need.formulas) load.push("formulas");
+            if (need.valueTypes) load.push("valueTypes");
             if (need.format) load.push("numberFormat");
             if (load.length) r.load(load);
             if (need.format && r.format && typeof r.format.load === "function") {
@@ -622,6 +629,7 @@
             var entry = {};
             if (need.values) entry.values = r.values;
             if (need.formulas) entry.formulas = r.formulas;
+            if (need.valueTypes) entry.valueTypes = r.valueTypes;
             if (need.format) {
               entry.numberFormat = r.numberFormat;
               entry.format = r.format ? {
@@ -641,7 +649,114 @@
       });
       snap.sheets[sheetName] = data;
     }
-    return snap;
+    // Freeze the captured data independently of live Office or test objects.
+    return JSON.parse(JSON.stringify(snap));
+  }
+
+  function selectSnapshot(snapshot, ops) {
+    var out = { sheets: {} };
+    (ops || []).forEach(function (op) {
+      var need = snapshotRequirements(op), source = snapshot && snapshot.sheets && snapshot.sheets[op.sheet] && snapshot.sheets[op.sheet][op.range];
+      if (!need || !source) return;
+      if (!out.sheets[op.sheet]) out.sheets[op.sheet] = {};
+      var entry = out.sheets[op.sheet][op.range] || (out.sheets[op.sheet][op.range] = {});
+      if (need.values) entry.values = source.values;
+      if (need.formulas) entry.formulas = source.formulas;
+      if (need.valueTypes) entry.valueTypes = source.valueTypes;
+      if (need.format) { entry.numberFormat = source.numberFormat; entry.format = source.format; }
+    });
+    return JSON.parse(JSON.stringify(out));
+  }
+
+  // Compare only the selected operations' captured properties. Conservative:
+  // a recalculated formula value can trigger a re-review rather than risk an
+  // overwriting edit. This is a check, not an atomic Excel transaction.
+  function snapshotConflicts(expected, actual, ops) {
+    var conflicts = [];
+    (ops || []).forEach(function (op) {
+      var needs = snapshotRequirements(op);
+      if (!needs) return;
+      var a = expected && expected.sheets && expected.sheets[op.sheet] && expected.sheets[op.sheet][op.range];
+      var b = actual && actual.sheets && actual.sheets[op.sheet] && actual.sheets[op.sheet][op.range];
+      if (!a || !b) { conflicts.push(op.address); return; }
+      var keys = [];
+      if (needs.values) keys.push("values");
+      if (needs.formulas) keys.push("formulas");
+      if (needs.valueTypes) keys.push("valueTypes");
+      if (needs.format) keys.push("numberFormat", "format");
+      if (keys.some(function (key) { return JSON.stringify(a[key]) !== JSON.stringify(b[key]); })) conflicts.push(op.address);
+    });
+    return conflicts.filter(function (value, index) { return conflicts.indexOf(value) === index; });
+  }
+
+  // Describe proposed changes without claiming that Excel has calculated them.
+  // For fills with relative references, the seed is shown rather than invented
+  // per-cell formulas. The visual preview is bounded but the guard is not.
+  function previewCellChanges(ops, snapshot, limit) {
+    var rows = [], truncated = false;
+    limit = Math.max(1, Number(limit) || 50);
+    (ops || []).forEach(function (op) {
+      if (op.op !== "setValues" && op.op !== "setFormulas") return;
+      var data = snapshot && snapshot.sheets && snapshot.sheets[op.sheet] && snapshot.sheets[op.sheet][op.range];
+      if (!data) return;
+      var match = String(op.range).replace(/\$/g, "").match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+      if (!match) return;
+      var dims = rangeDimensions(op.range), baseCol = columnIndex(match[1].toUpperCase()), baseRow = Number(match[2]);
+      var proposed = op.op === "setValues" ? as2d(op.values) : (op.formulas != null ? as2d(op.formulas) : null);
+      for (var r = 0; r < dims.rows; r++) for (var c = 0; c < dims.columns; c++) {
+        if (rows.length >= limit) { truncated = true; continue; }
+        var beforeFormula = data.formulas && data.formulas[r] && data.formulas[r][c];
+        var beforeValue = data.values && data.values[r] && data.values[r][c];
+        var before = typeof beforeFormula === "string" && beforeFormula.charAt(0) === "=" ? beforeFormula : beforeValue;
+        var after = proposed ? (proposed[r] && proposed[r][c]) : (op.formulaR1C1 || op.formula || "");
+        var note = !proposed && dims.rows * dims.columns > 1 ? " (fill seed; Excel translates references)" : "";
+        rows.push({ address: op.sheet + "!" + columnName(baseCol + c) + (baseRow + r), before: before == null ? "" : String(before), after: (after == null ? "[missing]" : String(after)) + note });
+      }
+    });
+    return { rows: rows, truncated: truncated };
+  }
+
+  // A readback is not automatically verification: compare the exact supported
+  // writes and only report Excel error cells when valueTypes identifies them.
+  // Translated fills, formatting and overlapping writes remain unverified.
+  function verifyCellResults(ops, snapshot) {
+    var results = [];
+    (ops || []).forEach(function (op, index) {
+      if (op.op !== "setValues" && op.op !== "setFormulas") return;
+      var data = snapshot && snapshot.sheets && snapshot.sheets[op.sheet] && snapshot.sheets[op.sheet][op.range];
+      var result = { address: op.address, status: "unverified", mismatches: 0, errors: [], reason: "" };
+      if (!data || !Array.isArray(data.values) || !Array.isArray(data.formulas)) {
+        result.reason = "Readback unavailable"; results.push(result); return;
+      }
+      // Multiple writes on the same sheet might overlap, including different
+      // address strings. Avoid wrongly attributing final data to one write.
+      if ((ops || []).some(function (other, i) { return i !== index && other.sheet === op.sheet; })) {
+        result.reason = "Multiple operations on the same sheet; final state not attributed to one operation";
+      }
+      var dims = rangeDimensions(op.range);
+      var expected = op.op === "setValues" ? as2d(op.values) : (op.formulas != null ? as2d(op.formulas) : (op.formulaR1C1 == null && dims.rows === 1 && dims.columns === 1 && op.formula ? [[op.formula]] : null));
+      var foundMissing = false;
+      for (var r = 0; r < dims.rows; r++) for (var c = 0; c < dims.columns; c++) {
+        var typ = data.valueTypes && data.valueTypes[r] && data.valueTypes[r][c];
+        if (typ == null && !result.reason) result.reason = "Excel error-type data unavailable";
+        if (String(typ || "").toLowerCase() === "error" && result.errors.length < 20) {
+          var parts = addressParts(op.range).ref.replace(/\$/g, "").match(/^([A-Z]+)(\d+)/i);
+          var address = parts ? columnName(columnIndex(parts[1].toUpperCase()) + c) + (Number(parts[2]) + r) : op.range;
+          result.errors.push({ cell: op.sheet + "!" + address, error: String((data.values[r] || [])[c] || "Excel error") });
+        }
+        if (expected) {
+          var actualRow = (op.op === "setValues" ? data.values : data.formulas)[r];
+          if (!Array.isArray(expected[r]) || c >= expected[r].length || !Array.isArray(actualRow) || c >= actualRow.length) { foundMissing = true; continue; }
+          var actual = actualRow[c];
+          if (actual !== expected[r][c]) result.mismatches++;
+        }
+      }
+      if (!result.reason && foundMissing) result.reason = "Readback dimensions incomplete";
+      if (!result.reason && !expected) result.reason = "Relative or R1C1 formula fill requires host-specific verification";
+      if (!result.reason) result.status = result.mismatches ? "mismatch" : "verified";
+      results.push(result);
+    });
+    return results;
   }
 
   /** Execute one operation per Excel.run batch so one failure does not abort the rest. */
@@ -785,6 +900,10 @@
     normalizeOp: normalizeOp,
     planLines: planLines,
     snapshotCells: snapshotCells,
+    selectSnapshot: selectSnapshot,
+    snapshotConflicts: snapshotConflicts,
+    previewCellChanges: previewCellChanges,
+    verifyCellResults: verifyCellResults,
     applyOps: applyOps,
     undoSnapshot: undoSnapshot,
     defaultDescription: defaultDescription,

@@ -1,6 +1,6 @@
 # Test report
 
-Ran on Node 24 (Windows 11). **386 automated checks across six suites, all passing**, plus
+Ran on Node 24 (Windows 11). **460 automated checks across six suites, all passing**, plus
 a live end-to-end verification against a real **OpenCode 2.1.4** service and the real task
 pane. The automated suites run offline against mock OpenCode services on isolated ports, so
 they can run while the add-in is in use.
@@ -12,12 +12,12 @@ npm run test:e2e  # original curl-driven end-to-end script
 
 | Suite | What it exercises | Checks |
 |---|---|---|
-| `tools/test-lib.mjs` | Pure helpers: markdown rendering, table extraction, A1 maths, escaping, header/column detection, **plan parsing, destructive classification, cell caps, auto-approval, operation-specific snapshots, formula fills, row/column normalization, chart argument order** | **129** |
+| `tools/test-lib.mjs` | Pure helpers: markdown rendering, table extraction, A1 maths, escaping, header/column detection, **plan parsing, destructive classification, bounded reads/search/trace, drift checks, readback verification, snapshots, formula fills, row/column normalization, chart argument order** | **183** |
 | `tools/test-format.mjs` | Native formatter against a fake Excel model: table, summary, number formats, freeze/print, conditional formatting, idempotency, **preflight failure without mutation** | **50** |
 | `tools/test-health.mjs` | Launcher health check, dev CA, strict-vs-CA validation, 503 handling | **7** |
 | `tools/test-starter.mjs` | Starter workbook: embedded add-in ID/version synchronization, valid XML declaration, ZIP extraction, packaged and prepared-file validation | **7** |
 | `tools/test-bridge.mjs` | Real bridge over HTTP/SSE: discovery, auth, v1 + v2 protocols, models, provider errors, resilience, hardening, **token/origin/host controls, attachment and audit endpoints** | **65** |
-| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **128** |
+| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **148** |
 
 ## How the pane is tested without Excel
 
@@ -42,6 +42,10 @@ exactly:
 * turning off **Send workbook samples** skips every sheet read and removes workbook data from the
   prompt while keeping the selection; the state is remembered and reflected in the context pill
 * `Send selection` off removes the selection from the prompt without disabling workbook samples
+* explicit `@range` reads enforce exact finite ranges, three-request/500-cell/12,000-character
+  limits, and model-requested reads expose no data until **Approve read & continue** is clicked
+* bounded `@search` and direct `@trace` requests fail closed for oversized workbooks, unsupported
+  hosts, invalid syntax, missing sheets, and out-of-bounds addresses
 * Stop finalises the turn; New chat clears the transcript; a dead bridge raises a banner
   **and** an in-transcript error
 * the **model dropdown** is populated from `/api/models`, groups by provider, persists the
@@ -68,6 +72,13 @@ exactly:
   multi-column span
 * **chart plans call `charts.add(chartType, source, seriesBy)` once** in the documented order and
   report a deferred sync error as a failed operation without retrying
+* supported cell-only plans show bounded before/proposed values and block apply when cells drift
+  after review; edited JSON returns to review instead of applying immediately
+* add-in Undo compares a post-apply snapshot first, blocks restoration over later edits, and keeps
+  the undo entry available for retry; post-write readback distinguishes verified, mismatched,
+  Excel-error, and explicitly unverified results
+* manual workbook backup export is sliced, size-bounded, closed on success/failure, and presented
+  as a download rather than claimed as automatic restore
 * **formatting undo honesty**: single-cell cell-local formatting is snapshotted and restored;
   multi-cell, border, row-height, column-width, and autofit formatting are not add-in-undoable
 * **native Format sheet invalidates older snapshots** before it can insert rows or rewrite cells,
@@ -158,7 +169,7 @@ Verified on the user's machine against `http://127.0.0.1:28894` (v2.1.4):
 | 7 | A dead bridge failed silently in the transcript only | Connection errors now raise a banner **and** an in-transcript message |
 | 8 | **Every v2 answer rendered `_No output._`** — the parser only read v1 `parts[]`, but v2 returns `content[]` with `type: "text"` / `"reasoning"` | Parse `content[]`, keep only text parts, and select the newest assistant message created after the prompt |
 | 9 | An empty v2 turn looked like a successful empty answer, hiding the provider error | Surface `error` / `retry` from the assistant message and SSE; render the message in the pane |
-| 10 | No way to choose a model; every session kept OpenCode's default | Added `/api/models`, switch via `POST /api/session/{id}/model` before each prompt, and a persisted ⚙ → *Model* dropdown |
+| 10 | No way to choose a model; every session kept OpenCode's default | Added `/api/models`, switch via `POST /api/session/{id}/model` before each prompt, and a persisted *Model* dropdown |
 | 11 | The bridge's static whitelist did not include `/format.js`, so the chip appeared but the formatter was a 404 | Added `/format.js` to the static map and a bridge test that serves it |
 | 12 | Office.js `Range.format.columnWidth` produced 1–2 character columns, so summary numbers rendered `#` | Replaced fixed widths with `autofitColumns()` after the summary is written |
 | 13 | `D3` held a single-cell array formula; writing a normal formula over it could fail with "part of an array" | Clear the summary formula cell (`clear("Contents")`) before setting the new formula |

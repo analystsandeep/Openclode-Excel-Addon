@@ -103,6 +103,7 @@
         <span id="previewCount" class="preview-badge">0 operations</span>
       </div>
       <div id="previewList" class="preview-list"></div>
+      <div id="previewDiff" class="preview-diff" aria-live="polite"></div>
       <div class="preview-actions">
         <label class="checkbox" style="margin:0; display:inline-flex; align-items:center; gap:6px;">
           <input id="previewSelectAll" type="checkbox" checked />
@@ -111,7 +112,9 @@
         <button id="btnApplyPlan" class="primary-btn">Apply checked changes</button>
         <button id="btnCancelPlan" class="ghost-btn">Cancel</button>
         <button id="btnShowPlanJson" class="link-btn">Show plan JSON</button>
-        <button id="btnApplyEdited" class="link-btn hidden">Apply edited plan</button>
+        <button id="btnPrepareBackup" class="link-btn" title="Prepare a local workbook copy before applying changes">Prepare backup</button>
+        <a id="backupDownload" class="link-btn hidden">Download prepared backup</a>
+        <button id="btnApplyEdited" class="link-btn hidden">Review edited plan</button>
       </div>
       <div id="planDetails" class="plan-details hidden">
         <textarea id="planEdit" rows="6" style="width:100%; font-family:Consolas,monospace; font-size:11px;"></textarea>
@@ -135,6 +138,7 @@
         <button id="btnRefreshContext" class="refresh-btn" title="Refresh workbook context" aria-label="Refresh workbook context">↻</button>
         <div id="ctxSheets" class="ctx-sheets"></div>
       </section>
+      <div id="verificationReport" class="preview-note hidden" role="status"></div>
       <div id="undoRow" class="stop-row hidden">
         <span id="undoText">Undo last change?</span>
         <button id="btnUndo" class="ghost-btn">Undo</button>
@@ -145,7 +149,7 @@
         <button id="btnStop" class="ghost-btn">Stop</button>
       </div>
       <div class="composer-box">
-        <textarea id="input" rows="2" placeholder="Ask anything, @ for context"></textarea>
+        <textarea id="input" rows="2" placeholder='Ask anything; use @range(Sheet1!A1:B10), @trace(Sheet1!A1), or @search("text")'></textarea>
         <div class="composer-row">
           <div class="composer-tools">
             <button id="btnAttach" class="round-tool" title="Attach up to 20 files" aria-label="Attach files">＋</button>
