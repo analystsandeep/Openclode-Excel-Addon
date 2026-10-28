@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OpenCode for Excel</title>
+  <link rel="stylesheet" href="taskpane-clean.css" />
+  <!-- Office.js must load from the Microsoft CDN inside Excel.
+       If it is missing (e.g. opening this file outside Excel) the pane stays
+       in preview mode so you can still see the UI. -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+</head>
+<body>
+  <div id="app">
+    <header class="bar">
+      <button id="btnNewChat" class="new-chat-btn" title="Start a new chat">New chat</button>
+      <div class="bar-actions">
+        <button id="btnAttachTop" class="icon-btn" title="Attach files" aria-label="Attach files">📎</button>
+        <button id="btnSettings" class="icon-btn more-btn" title="Settings and shortcuts" aria-label="Settings and shortcuts">•••</button>
+      </div>
+    </header>
+
+    <div id="settingsPanel" class="panel settings-popover hidden">
+      <div class="settings-head">
+        <strong>OpenCode settings</strong>
+        <span class="subtitle" id="statusText">Connecting…</span>
+      </div>
+      <label class="field">
+        <span>Agent</span>
+        <select id="agentSelect"><option value="">Default</option></select>
+      </label>
+      <label class="field">
+        <span>Skill / playbook</span>
+        <select id="skillSelect"><option value="">None</option></select>
+      </label>
+      <label class="field">
+        <span>Max cells sent</span>
+        <input id="maxCells" type="number" min="50" max="5000" step="50" value="400" />
+      </label>
+      <label class="checkbox">
+        <input id="includeSheets" type="checkbox" checked />
+        <span>Include sheet names</span>
+      </label>
+      <label class="checkbox">
+        <input id="chkReadOnly" type="checkbox" />
+        <span>Read-only mode (questions only, no workbook changes)</span>
+      </label>
+      <label class="field">
+        <span>Approval gates</span>
+        <select id="selApproval">
+          <option value="always">Ask before every change</option>
+          <option value="auto">Auto-apply changes touching 5 or fewer cells</option>
+          <option value="never">Never ask (not recommended)</option>
+        </select>
+      </label>
+      <div class="hint">
+        Sessions run in a scratch workspace with <code>shell</code> and <code>edit</code>
+        denied, so the agent can answer but cannot touch files.
+      </div>
+      <div class="settings-links">
+        <button id="btnAuditLog" class="link-btn">Audit log</button>
+        <button id="btnConnections" class="link-btn">Connections</button>
+      </div>
+      <div id="connectionsList" class="hint hidden"></div>
+      <div id="auditLog" class="settings-output hidden"></div>
+
+      <div class="shortcut-title">Shortcuts</div>
+      <div class="shortcut-grid" id="quickActions">
+        <button class="chip format-chip" data-action="format">Format sheet</button>
+        <button class="chip" data-action="explain">Explain formula</button>
+        <button class="chip" data-action="fix">Fix formula</button>
+        <button class="chip" data-action="clean">Clean data</button>
+        <button class="chip" data-action="table">Summarize</button>
+        <button class="chip" data-action="formula">Write formula</button>
+        <button class="chip" data-action="audit">Audit workbook</button>
+        <button class="chip" data-action="variance">Variance analysis</button>
+        <button class="chip" data-action="scenario">Scenario tabs</button>
+        <button class="chip" data-action="dashboard">Dashboard</button>
+        <button class="chip" data-action="newsheet">New sheet</button>
+        <button class="chip" data-action="research">Web research</button>
+        <button class="chip" data-action="vba">Write VBA</button>
+        <button class="chip" data-action="pivot">Pivot advice</button>
+      </div>
+    </div>
+
+    <main id="messages" class="messages">
+      <div class="empty" id="emptyState">
+        <div class="suggested-title">Suggested</div>
+        <button class="chip suggestion" data-action="budget"><span>↳</span> Build a personal budget</button>
+        <button class="chip suggestion" data-action="debt"><span>↳</span> Build a debt payoff planner</button>
+        <button class="chip suggestion" data-action="dashboard"><span>↳</span> Build a personal finance dashboard</button>
+      </div>
+    </main>
+
+    <div id="previewPanel" class="preview-panel hidden">
+      <div class="preview-head">
+        <span class="preview-title">Review changes before applying</span>
+        <span id="previewCount" class="preview-badge">0 operations</span>
+      </div>
+      <div id="previewList" class="preview-list"></div>
+      <div class="preview-actions">
+        <label class="checkbox" style="margin:0; display:inline-flex; align-items:center; gap:6px;">
+          <input id="previewSelectAll" type="checkbox" checked />
+          <span>Select all</span>
+        </label>
+        <button id="btnApplyPlan" class="primary-btn">Apply checked changes</button>
+        <button id="btnCancelPlan" class="ghost-btn">Cancel</button>
+        <button id="btnShowPlanJson" class="link-btn">Show plan JSON</button>
+        <button id="btnApplyEdited" class="link-btn hidden">Apply edited plan</button>
+      </div>
+      <div id="planDetails" class="plan-details hidden">
+        <textarea id="planEdit" rows="6" style="width:100%; font-family:Consolas,monospace; font-size:11px;"></textarea>
+        <div id="planJsonText" style="white-space:pre-wrap; font-family:Consolas,monospace; font-size:11px; padding:6px; background:var(--code-bg); border:1px solid var(--line); border-radius:4px;"></div>
+      </div>
+      <div id="previewNote" class="preview-note"></div>
+    </div>
+
+    <footer class="composer">
+      <div id="attachRow" class="attach-row hidden">
+        <input type="file" id="fileInput" multiple class="visually-hidden" />
+        <div id="attachChips" class="attach-chips"></div>
+        <button id="btnClearAttachments" class="link-btn">Clear</button>
+      </div>
+      <section class="context">
+        <label class="context-pill" title="Include the selected cells as context">
+          <input id="includeSelection" type="checkbox" checked />
+          <span class="sheet-glyph">▦</span>
+          <span id="contextInfo" class="context-info">No selection</span>
+        </label>
+        <button id="btnRefreshContext" class="refresh-btn" title="Refresh workbook context" aria-label="Refresh workbook context">↻</button>
+        <div id="ctxSheets" class="ctx-sheets"></div>
+      </section>
+      <div id="undoRow" class="stop-row hidden">
+        <span id="undoText">Undo last change?</span>
+        <button id="btnUndo" class="ghost-btn">Undo</button>
+        <span class="undo-hint" id="undoHint">or press Ctrl+Z in Excel</span>
+      </div>
+      <div id="stopRow" class="stop-row hidden">
+        <span id="activity">Working…</span>
+        <button id="btnStop" class="ghost-btn">Stop</button>
+      </div>
+      <div class="composer-box">
+        <textarea id="input" rows="2" placeholder="Ask anything, @ for context"></textarea>
+        <div class="composer-row">
+          <div class="composer-tools">
+            <button id="btnAttach" class="round-tool" title="Attach up to 20 files" aria-label="Attach files">＋</button>
+            <select id="modelSelect" class="model-select" aria-label="OpenCode model"><option value="">Default model</option></select>
+          </div>
+          <button id="btnSend" class="send-btn" title="Send" aria-label="Send">↑</button>
+        </div>
+      </div>
+    </footer>
+
+    <div id="banner" class="banner hidden"></div>
+  </div>
+
+  <script src="lib.js"></script>
+  <script src="plan.js"></script>
+  <script src="format.js"></script>
+  <script src="taskpane.js"></script>
+</body>
+</html>
