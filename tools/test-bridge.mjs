@@ -387,6 +387,8 @@ async function main() {
     ok("pane loads the formatter script", (await pane.text()).includes('src="format.js"'));
     const css = await fetch(`${BRIDGE}/taskpane-clean.css`);
     ok("clean UI css served with the right mime type", /text\/css/.test(css.headers.get("content-type") || ""), css.headers.get("content-type"));
+    const cssBody = await css.text();
+    ok("settings popover blocks horizontal overflow", /\.settings-popover[\s\S]*?overflow-x:\s*hidden/.test(cssBody), cssBody.slice(0, 500));
     const format = await fetch(`${BRIDGE}/format.js`);
     const formatBody = await format.text();
     ok("formatter script is served", format.status === 200 && /javascript/.test(format.headers.get("content-type") || ""), `status ${format.status}, ${format.headers.get("content-type")}`);

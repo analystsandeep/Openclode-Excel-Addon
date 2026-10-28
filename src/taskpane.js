@@ -1294,7 +1294,11 @@
       (data.agents || []).forEach(function (agent) {
         var option = document.createElement("option");
         option.value = agent.id;
-        option.textContent = agent.id + (agent.description ? " — " + agent.description : "");
+        // Native select popups in the Excel WebView size themselves from the
+        // longest option. Keep labels short so built-in agent instructions do
+        // not create a task-pane-wide horizontal scrollbar.
+        option.textContent = String(agent.id).slice(0, 60);
+        if (agent.description) option.title = String(agent.description).slice(0, 240);
         select.appendChild(option);
       });
     } catch (err) {
@@ -1310,7 +1314,8 @@
       (data.skills || []).forEach(function (skill) {
         var option = document.createElement("option");
         option.value = skill.id;
-        option.textContent = (skill.name || skill.id) + (skill.description ? " — " + skill.description : "");
+        option.textContent = String(skill.name || skill.id).slice(0, 60);
+        if (skill.description) option.title = String(skill.description).slice(0, 240);
         select.appendChild(option);
       });
     } catch (err) {

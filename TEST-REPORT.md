@@ -1,6 +1,6 @@
 # Test report
 
-Ran on Node 24 (Windows 11). **266 automated checks across six suites, all passing**, plus
+Ran on Node 24 (Windows 11). **270 automated checks across six suites, all passing**, plus
 a live end-to-end verification against a real **OpenCode 2.1.4** service and the real task
 pane. The automated suites run offline against mock OpenCode services on isolated ports, so
 they can run while the add-in is in use.
@@ -16,8 +16,8 @@ npm run test:e2e  # original curl-driven end-to-end script
 | `tools/test-format.mjs` | Native formatter against a fake Excel model: table, summary, number formats, freeze/print, conditional formatting, idempotency | **49** |
 | `tools/test-health.mjs` | Launcher health check, dev CA, strict-vs-CA validation, 503 handling | **7** |
 | `tools/test-starter.mjs` | Runtime starter workbook: embedded add-in ID/version synchronization and valid XML declaration | **4** |
-| `tools/test-bridge.mjs` | Real bridge over HTTP/SSE: discovery, auth, v1 + v2 protocols, models, provider errors, resilience, hardening, **attachment and audit endpoints** | **59** |
-| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **94** |
+| `tools/test-bridge.mjs` | Real bridge over HTTP/SSE: discovery, auth, v1 + v2 protocols, models, provider errors, resilience, hardening, **attachment and audit endpoints** | **60** |
+| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **97** |
 
 ## How the pane is tested without Excel
 
@@ -44,6 +44,8 @@ exactly:
   present in the mock catalog is never selected automatically
 * summary requests receive dedicated instructions to analyze row-level records, report business
   insights and trends, cite compact source ranges, and avoid formula inventories
+* long agent and skill descriptions stay in option metadata instead of expanding native Excel
+  dropdown labels, and the settings popover suppresses horizontal overflow
 * an empty turn renders the provider's error (or the "no reply was returned" hint) instead
   of `_No output._`
 * the **Format sheet** chip calls the native formatter instead of sending a model prompt,

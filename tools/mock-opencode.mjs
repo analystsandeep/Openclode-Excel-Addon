@@ -98,7 +98,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/api/info") return send(res, 200, { version: "2.0.0-mock", pid: process.pid });
-  if (url.pathname === "/api/agent") return send(res, 200, { data: [{ name: "build" }, { name: "excel" }] });
+  if (url.pathname === "/api/agent") return send(res, 200, { data: [
+    { name: "build", description: "Primary agent for completing workbook requests." },
+    { name: "explore", description: "Fast agent specialized for exploring codebases. When calling this agent, specify the desired thoroughness level and include all relevant context." },
+  ] });
+  if (url.pathname === "/api/skill") return send(res, 200, { data: [
+    { id: "financial-analysis", name: "Financial analysis", description: "Analyze financial statements, trends, ratios, forecasts, and supporting workbook ranges in detail." },
+  ] });
   if (url.pathname === "/api/model/default") {
     const model = MODELS.find((m) => m.id === "flint-40b-free");
     return send(res, 200, { location: {}, data: model });

@@ -314,6 +314,11 @@ async function main() {
     ok("context shows selection", /Sheet1!A1:D20/.test(contextInfo) && /20×4/.test(contextInfo), `got: "${contextInfo}"`);
     ok("context lists workbook sheets", /Sheet1/.test(window.document.getElementById("ctxSheets").textContent), `got: "${window.document.getElementById("ctxSheets").textContent}"`);
     ok("agents loaded into dropdown", window.document.getElementById("agentSelect").options.length >= 3, `options: ${window.document.getElementById("agentSelect").options.length}`);
+    const agentLabels = Array.from(window.document.getElementById("agentSelect").options).map((option) => option.textContent);
+    ok("agent dropdown keeps descriptions out of option labels", agentLabels.includes("explore") && !agentLabels.some((label) => /thoroughness|specialized/.test(label)), agentLabels.join(" | "));
+    ok("skills loaded into dropdown", window.document.getElementById("skillSelect").options.length >= 2, `options: ${window.document.getElementById("skillSelect").options.length}`);
+    const skillLabels = Array.from(window.document.getElementById("skillSelect").options).map((option) => option.textContent);
+    ok("skill dropdown keeps descriptions out of option labels", skillLabels.includes("Financial analysis") && !skillLabels.some((label) => /statements|forecasts/.test(label)), skillLabels.join(" | "));
     ok("models loaded into dropdown", window.document.getElementById("modelSelect").options.length >= 3, `options: ${window.document.getElementById("modelSelect").options.length}`);
     ok("selection-change handler registered", fake.selectionHandlers.length === 1, `handlers: ${fake.selectionHandlers.length}`);
 
