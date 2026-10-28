@@ -19,7 +19,7 @@ one-click launcher without requiring terminal commands.
 - Generate Excel formulas, summaries, variance analysis, scenarios, and dashboard layouts.
 - Review workbook edits before applying them, with exact sheet and range references.
 - Apply values, formulas, formatting, tables, charts, row and column operations, and sheet changes.
-- Restore recent cell-only changes with local snapshots; use Excel's own Undo for structural edits.
+- Restore recent cell writes and single-cell, cell-local formatting with local snapshots; use Excel's own Undo for structural edits.
 - Attach documents, images, spreadsheets, CSV files, and text files through OpenCode V2.
 - Use OpenCode models, agents, skills, MCP connections, and provider settings.
 - Retry unavailable models with a verified free OpenCode fallback without selecting paid providers.
@@ -141,13 +141,17 @@ workbooks for the rest of the Excel session. To remove the add-in later:
   charts), it replies with a **change plan** instead of plain text. The plan lists every
   operation with the exact cells/tabs it touches, so you can review before anything is written.
   Uncheck operations you don't want, then click **Apply checked changes**. A before-snapshot is
-  kept for cell edits so you can click **Undo** afterwards; structural and object operations are
-  not add-in-undoable, so use Excel's own Undo or a backup for those.
+  kept for cell writes and single-cell, cell-local formatting so you can click **Undo**
+  afterwards. Multi-cell formatting, borders, row heights, column widths, autofit, and
+  structural/object operations are not add-in-undoable, so use Excel's own Undo or a backup for
+  those.
 * **Read-only mode** - the three-dot settings menu lets you ask questions and audit without any
   workbook edits being possible (apply buttons are disabled).
 * **Approval gates** - use the three-dot settings menu to choose *Ask before every change* (default), *Auto-apply
   safe formatting touching 5 or fewer cells*, or *Auto-apply safe formatting*. Destructive and
-  structural operations are always unchecked and never auto-applied.
+  structural operations are always unchecked and never auto-applied. Border, row-height,
+  column-width, and autofit formatting always require review because they affect cells outside
+  the reviewed range.
 * **Quick actions** - *Explain formula*, *Fix formula*, *Write formula*, *Clean this data*,
   *Summarize as table*, *Audit workbook*, *Variance analysis*, *Scenario tabs*, *Dashboard*,
   *New sheet*, *Web research*, *Write VBA*, *Pivot advice*.
@@ -247,7 +251,7 @@ before `npm run dev`.
 | Pane says *Not connected* | Is `npm run dev` running? In a terminal run `opencode service status`; start the OpenCode desktop app or `opencode service start` |
 | Status dot red, banner shows `401` | `opencode service get password`, then `set OPENCODE_SERVICE_PASSWORD=<value>` and restart the bridge |
 | *"We can't open this add-in from localhost"* | `npx office-addin-dev-certs install`, restart Excel (see the loopback command in §3) |
-| Yellow *"ADD-IN ERROR… only available during debugging from Visual Studio"* | Save your work and close **every** Excel window, then run `Start OpenCode for Excel.bat` again. The launcher now creates a runtime starter workbook whose embedded ID/version exactly matches `manifest.xml`; do not reopen an older starter workbook from Excel's Recent list. |
+| Yellow *"ADD-IN ERROR… only available during debugging from Visual Studio"* | Save your work and close **every** Excel window, then run `Start OpenCode for Excel.bat` again. The packaged starter workbook is kept in sync with `manifest.xml`, and the launcher also creates a repaired runtime copy whose embedded ID/version exactly matches the manifest; do not reopen an older starter workbook from Excel's Recent list. |
 | Ribbon button missing | `npm run unsideload && npm run sideload`, then restart Excel |
 | Answer never finishes | Bridge falls back to polling after 45s of silence and finishes with what arrived. Check `%USERPROFILE%\.local\share\opencode\log\opencode.log` |
 | *Format sheet* says "The sheet formatter did not load" | Reload the pane (click **OpenCode** on the Home tab) or restart the launcher; the bridge must serve `/format.js` |
@@ -299,7 +303,7 @@ the exact sheet and range it touches.
 1. **Review** — the pane renders the plan as a change preview with cell-level references. Destructive operations (overwrites, deletes, inserts that shift data, merges, sorts) are unchecked by default and are never auto-applied.
 2. **Approve** — check the operations you want and click **Apply checked changes**. The pane snapshots bounded before-values for cell-only operations, then applies the operations through Office.js.
 3. **Audit** - every prompt, plan and apply is appended to `workspace/audit.log` and can be viewed from the settings menu.
-4. **Undo** — **Undo** restores only cell values, formulas, and basic formatting from the add-in snapshot. Row/column/sheet/table/chart operations are not structurally reversed; use Excel's Ctrl+Z or restore a backup for those.
+4. **Undo** — **Undo** restores cell values and formulas, plus the cell-local formatting of a single-cell `formatRange`. It does not restore multi-cell formatting, borders, row heights, column widths, autofit, or structural/object changes; use Excel's Ctrl+Z or restore a backup for those. Native **Format sheet** discards older add-in snapshots because it can insert rows and shift cells.
 
 ## 10. Verifying without OpenCode
 

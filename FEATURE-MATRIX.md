@@ -20,14 +20,15 @@ conservative: a feature is marked complete only when the add-in has an executabl
 - JSON change plans with exact sheets/ranges, assumptions, operation counts, and affected-cell
   estimates.
 - Per-operation approval, select-all, and read-only mode. Automatic approval is limited to finite,
-  non-destructive formatting; destructive, structural, and object operations are never
-  auto-applied.
+  non-destructive, cell-local formatting; border, row-height, column-width, and autofit formatting
+  always require review. Destructive, structural, and object operations are never auto-applied.
 - Values, formulas, R1C1 formula fills, clearing, row/column insertion and deletion, sheet add /
   rename / delete, formatting and borders, autofit, merge/unmerge, tables, sorting, basic charts,
   and freeze panes.
-- Bounded before-value/formula/number-format/basic-format snapshots and an eight-entry undo stack
-  for cell-only operations (`setValues`, `setFormulas`, `formatRange`). Merge, sort, clear,
-  row/column, sheet, table, and chart operations are not add-in-undoable.
+- Bounded before-value/formula snapshots for cell writes and before-formatting snapshots for
+  single-cell, cell-local `formatRange`, with an eight-entry undo stack. Multi-cell formatting,
+  borders, row heights, column widths, autofit, merge, sort, clear, row/column, sheet, table, and
+  chart operations are not add-in-undoable.
 - For structural edits, use Excel's own Undo where available or restore a backup. All changes are
   recorded in local JSONL audit records.
 - Direct answer/table/formula insertion uses the same snapshot and audit path for the cell writes.
@@ -53,7 +54,8 @@ conservative: a feature is marked complete only when the add-in has an executabl
 - **Undo of structural objects:** the add-in deliberately does not offer Undo for row/column,
   sheet, table, chart, merge, sort, or clear operations because it cannot completely reverse them.
   Use Excel's own Undo or a backup for those changes. Cell-level snapshots are capped at 5,000
-  cells, and unknown or named ranges are never auto-approved or snapshotted.
+  cells, unknown or named ranges are never auto-approved or snapshotted, and native **Format
+  sheet** discards older snapshots because it can insert rows and shift cells.
 - **Charts:** common chart creation/deletion and positioning are supported; advanced styling and
   specialized chart types are not.
 - **VBA and PivotTables:** the assistant can explain or generate instructions/code, but the add-in

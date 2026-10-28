@@ -44,6 +44,7 @@
     "office-addin-dev-certs": "^1.13.5"
   },
   "devDependencies": {
+    "fflate": "^0.8.3",
     "jsdom": "^29.1.1"
   }
 }

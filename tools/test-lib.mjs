@@ -138,6 +138,39 @@ check("sheet creation is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp
 check("clearing is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp({ op: "clearRange", sheet: "Data", range: "A1" })), false);
 check("row insertion is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp({ op: "insertRows", sheet: "Data", at: 2, count: 1 })), false);
 
+const singleCellFormat = plan.normalizeOp({ op: "formatRange", sheet: "Data", range: "A1", format: { bold: true, fill: "#FFEEAA" } });
+check("single-cell cell-local formatting is add-in undo-safe", plan.isUndoSafe(singleCellFormat), true);
+check("multi-cell formatting is not add-in undo-safe", plan.isUndoSafe(safeFormat), false);
+check("border formatting is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp({
+  op: "formatRange", sheet: "Data", range: "A1",
+  format: { borders: { EdgeBottom: { style: "Continuous", weight: "Thick", color: "#FF0000" } } },
+})), false);
+check("row-height formatting is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp({
+  op: "formatRange", sheet: "Data", range: "A1", format: { rowHeight: 200 },
+})), false);
+check("column-width formatting is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp({
+  op: "formatRange", sheet: "Data", range: "A1", format: { columnWidth: 300 },
+})), false);
+check("autofit formatting is not add-in undo-safe", plan.isUndoSafe(plan.normalizeOp({
+  op: "formatRange", sheet: "Data", range: "A1", format: { autofitColumns: true },
+})), false);
+
+check("single-cell cell-local formatting can auto-apply", plan.canAutoApply([singleCellFormat], 5), true);
+check("autofitRange is not auto-applied", plan.canAutoApply([plan.normalizeOp({ op: "autofitRange", sheet: "Data", range: "A1" })], 5000), false);
+check("border formatting is not auto-applied", plan.canAutoApply([plan.normalizeOp({
+  op: "formatRange", sheet: "Data", range: "A1",
+  format: { borders: { EdgeBottom: { style: "Continuous" } } },
+})], 5000), false);
+check("row-height formatting is not auto-applied", plan.canAutoApply([plan.normalizeOp({
+  op: "formatRange", sheet: "Data", range: "A1", format: { rowHeight: 200 },
+})], 5000), false);
+check("column-width formatting is not auto-applied", plan.canAutoApply([plan.normalizeOp({
+  op: "formatRange", sheet: "Data", range: "A1", format: { columnWidth: 300 },
+})], 5000), false);
+check("autofit formatting is not auto-applied", plan.canAutoApply([plan.normalizeOp({
+  op: "formatRange", sheet: "Data", range: "A1", format: { autofitColumns: true },
+})], 5000), false);
+
 check("whole-column ranges are unbounded", plan.rangeCellCount("Data!A:C"), Infinity);
 check("whole-row ranges are unbounded", plan.rangeCellCount("Data!1:3"), Infinity);
 check("named ranges are unbounded", plan.rangeCellCount("Data!MyRange"), Infinity);
@@ -205,6 +238,80 @@ const liedOp = {
 let capError = null;
 try { await plan.snapshotCells(snapshotExcel, [liedOp]); } catch (err) { capError = err; }
 check("snapshot re-checks the real range size", !!capError && /safety limit/.test(capError.message), true);
+
+// Snapshots must capture only the state the operation can change. Restoring
+// range-level formatting for a value write can overwrite mixed formatting and
+// whole-row/column dimensions outside the reviewed cells.
+function makeRecordingSheet() {
+  const state = { loads: [] };
+  const range = {
+    values: [["before"]],
+    formulas: [["=1+1"]],
+    numberFormat: [["General"]],
+    load: function (props) { state.loads.push(props.slice()); },
+    format: {
+      horizontalAlignment: "Left", verticalAlignment: "Top", wrapText: false,
+      font: { bold: true, italic: false, size: 12, color: "#111111" },
+      fill: { color: "#EEEEEE" },
+      load: function (props) { state.loads.push(props.map(function (p) { return "format." + p; })); },
+    },
+  };
+  range.format.font.load = function (props) { state.loads.push(props.map(function (p) { return "font." + p; })); };
+  range.format.fill.load = function (props) { state.loads.push(["fill." + props]); };
+  const sheet = { name: "Data", getRange: function () { return range; } };
+  const Excel = {
+    run: async function (fn) {
+      return fn({
+        workbook: {
+          worksheets: {
+            getActiveWorksheet: function () { return sheet; },
+            getItem: function () { return sheet; },
+          },
+        },
+        sync: async function () {},
+      });
+    },
+  };
+  return { Excel, state, range };
+}
+
+const writeSnap = makeRecordingSheet();
+const writeSnapshot = await plan.snapshotCells(writeSnap.Excel, [
+  plan.normalizeOp({ op: "setValues", sheet: "Data", range: "A1", values: [[1]] }),
+]);
+check("value-write snapshot loads only values and formulas", writeSnap.state.loads, [["values", "formulas"]]);
+check("value-write snapshot captures no formatting", Object.keys(writeSnapshot.sheets.Data.A1).sort(), ["formulas", "values"]);
+writeSnap.range.values = [["after"]];
+writeSnap.range.formulas = [["=2+2"]];
+writeSnap.range.format.font.bold = false;
+await plan.undoSnapshot(writeSnap.Excel, writeSnapshot);
+check("value-write undo restores values", writeSnap.range.values, [["before"]]);
+check("value-write undo restores formulas", writeSnap.range.formulas, [["=1+1"]]);
+check("value-write undo leaves formatting untouched", writeSnap.range.format.font.bold, false);
+
+const formatSnap = makeRecordingSheet();
+const formatSnapshot = await plan.snapshotCells(formatSnap.Excel, [
+  plan.normalizeOp({ op: "formatRange", sheet: "Data", range: "A1", format: { bold: false } }),
+]);
+check("format snapshot loads number format and cell formatting", formatSnap.state.loads, [
+  ["numberFormat"],
+  ["format.horizontalAlignment", "format.verticalAlignment", "format.wrapText"],
+  ["font.bold", "font.italic", "font.size", "font.color"],
+  ["fill.color"],
+]);
+check("format snapshot captures no values", Object.keys(formatSnapshot.sheets.Data.A1).sort(), ["format", "numberFormat"]);
+formatSnap.range.numberFormat = [["0.00"]];
+formatSnap.range.format.horizontalAlignment = "Center";
+formatSnap.range.format.font.bold = false;
+formatSnap.range.format.fill.color = "#000000";
+await plan.undoSnapshot(formatSnap.Excel, formatSnapshot);
+check("format undo restores number format", formatSnap.range.numberFormat, [["General"]]);
+check("format undo restores alignment", formatSnap.range.format.horizontalAlignment, "Left");
+check("format undo restores font", formatSnap.range.format.font.bold, true);
+check("format undo restores fill", formatSnap.range.format.fill.color, "#EEEEEE");
+
+const mixedSnapshot = await plan.snapshotCells(writeSnap.Excel, [safeFormat]);
+check("multi-cell formatting produces no undo snapshot", Object.keys(mixedSnapshot.sheets), []);
 
 var formulaAssignments = [];
 var formulaState = null;

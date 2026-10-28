@@ -26,6 +26,7 @@ const ANSWER = [
 // plan instead of the canned text answer. Used by tools/test-pane.mjs.
 const PLAN_MARKER = "PLAN_REQUEST";
 const SAFE_PLAN_MARKER = "SAFE_PLAN_REQUEST";
+const BORDER_PLAN_MARKER = "BORDER_PLAN_REQUEST";
 const DESTRUCTIVE_PLAN_MARKER = "DESTRUCTIVE_PLAN_REQUEST";
 const FALLBACK_MARKER = "FALLBACK_REQUEST";
 const EMPTY_MARKER = "EMPTY_REQUEST";
@@ -44,7 +45,15 @@ JSON.stringify({
   summary: "Update two cells",
   operations: [
     { op: "setValues", sheet: "Sheet1", range: "D5:E5", values: [["Safe","Plan"]], description: "Write two cells" },
-    { op: "formatRange", sheet: "Sheet1", range: "D5:E5", format: { bold: true }, description: "Style two cells" }
+    { op: "formatRange", sheet: "Sheet1", range: "D5", format: { bold: true }, description: "Style one cell" }
+  ]
+}, null, 1) +
+"\n```\n";
+const BORDER_PLAN_ANSWER = "```json\n" +
+JSON.stringify({
+  summary: "Add a red bottom border",
+  operations: [
+    { op: "formatRange", sheet: "Sheet1", range: "A1", format: { borders: { EdgeBottom: { style: "Continuous", weight: "Thick", color: "#FF0000" } } }, description: "Red bottom border on A1" }
   ]
 }, null, 1) +
 "\n```\n";
@@ -167,13 +176,15 @@ const server = http.createServer(async (req, res) => {
     lastPromptText = body.text;
     lastPromptFiles = body.files || [];
 
-    if (body.text.includes(SAFE_PLAN_MARKER) || body.text.includes(DESTRUCTIVE_PLAN_MARKER) ||
-        body.text.includes(PLAN_MARKER)) {
+    if (body.text.includes(SAFE_PLAN_MARKER) || body.text.includes(BORDER_PLAN_MARKER) ||
+        body.text.includes(DESTRUCTIVE_PLAN_MARKER) || body.text.includes(PLAN_MARKER)) {
       assistantText = body.text.includes(SAFE_PLAN_MARKER)
         ? SAFE_PLAN_ANSWER
-        : body.text.includes(DESTRUCTIVE_PLAN_MARKER)
-          ? DESTRUCTIVE_PLAN_ANSWER
-          : PLAN_ANSWER;
+        : body.text.includes(BORDER_PLAN_MARKER)
+          ? BORDER_PLAN_ANSWER
+          : body.text.includes(DESTRUCTIVE_PLAN_MARKER)
+            ? DESTRUCTIVE_PLAN_ANSWER
+            : PLAN_ANSWER;
       assistantCreated = Date.now();
       assistantCompleted = Date.now();
       assistantError = null;

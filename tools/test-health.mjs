@@ -32,9 +32,13 @@ const bridge = spawn(process.execPath, [path.join(ROOT, "bridge", "server.mjs")]
     OPENCODE_SERVICE_URL: `http://127.0.0.1:${MOCK_PORT}`,
     OPENCODE_SERVICE_PASSWORD: "secret",
     PORT: BRIDGE_PORT,
+    BRIDGE_SKIP_CERT_INSTALL: "1",
   },
-  stdio: ["ignore", "ignore", "inherit"],
+  stdio: ["ignore", "pipe", "pipe"],
 });
+let bridgeLog = "";
+bridge.stdout.on("data", (d) => (bridgeLog += d.toString()));
+bridge.stderr.on("data", (d) => (bridgeLog += d.toString()));
 const stop = () => {
   try { bridge.kill("SIGKILL"); } catch {}
   try { mock.kill("SIGKILL"); } catch {}
@@ -48,7 +52,10 @@ try {
     if (up) break;
     await sleep(500);
   }
-  if (!up) throw new Error("bridge did not start");
+  if (!up) {
+    const exit = bridge.exitCode != null ? ` (exit ${bridge.exitCode})` : "";
+    throw new Error(`bridge did not start${exit}\n${bridgeLog.trim()}`);
+  }
 
   console.log("\n== bridge health check ==");
   const ca = caPath();

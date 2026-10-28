@@ -91,6 +91,15 @@ function createFakeExcel() {
         fill: {},
         autofitColumns() { ops.push({ kind: "autofit", a1 }); },
         autofitRows() { ops.push({ kind: "autofitRows", a1 }); },
+        borders: {
+          getItem(edge) {
+            return {
+              set style(value) { ops.push({ kind: "border", a1, edge, prop: "style", value }); },
+              set weight(value) { ops.push({ kind: "border", a1, edge, prop: "weight", value }); },
+              set color(value) { ops.push({ kind: "border", a1, edge, prop: "color", value }); },
+            };
+          },
+        },
       },
     };
     return base;
@@ -243,6 +252,7 @@ async function main() {
       OPENCODE_SERVICE_URL: `http://127.0.0.1:${MOCK_PORT}`,
       OPENCODE_SERVICE_PASSWORD: "secret",
       BRIDGE_API_TOKEN: BRIDGE_TOKEN,
+      BRIDGE_SKIP_CERT_INSTALL: "1",
       PORT: BRIDGE_PORT,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -501,6 +511,42 @@ async function main() {
     check("add-in undo restores the cell before-state", safeRestored && safeRestored.values, [["Before", "State"]]);
     ok("undo row hides after the stack empties", window.document.getElementById("undoRow").classList.contains("hidden"));
 
+    /* --- native formatting invalidates older add-in undo entries -------- */
+    console.log("\n-- format sheet invalidates undo --");
+    planInput.value = "SAFE_PLAN_REQUEST: update two cells again";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    const againRows = Array.from(window.document.querySelectorAll(".op-row"));
+    againRows[0].querySelector("input[type=checkbox]").click();
+    window.document.getElementById("btnApplyPlan").click();
+    await sleep(500);
+    ok("fresh cell-only plan offers add-in undo", !window.document.getElementById("undoRow").classList.contains("hidden"));
+    formatChip.click();
+    await sleep(400);
+    ok("native formatting hides the stale undo row", window.document.getElementById("undoRow").classList.contains("hidden"));
+    window.document.getElementById("btnUndo").click();
+    await sleep(300);
+    ok("native formatting discards older undo snapshots", /Nothing to undo/.test(window.document.getElementById("banner").textContent), window.document.getElementById("banner").textContent);
+
+    /* --- border formatting is applied but never offered as add-in undo -- */
+    console.log("\n-- border formatting undo honesty --");
+    const borderApproval = window.document.getElementById("selApproval");
+    borderApproval.value = "auto";
+    borderApproval.dispatchEvent(new window.Event("change"));
+    planInput.value = "BORDER_PLAN_REQUEST: red bottom border";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    const borderRows = Array.from(window.document.querySelectorAll(".op-row"));
+    check("border plan has one row", borderRows.length, 1);
+    ok("border plan is shown for review in auto mode", !window.document.getElementById("previewPanel").classList.contains("hidden"));
+    check("auto mode did not apply the border", fake.ops.filter((o) => o.kind === "border").length, 0);
+    window.document.getElementById("btnApplyPlan").click();
+    await sleep(500);
+    const borderOps = fake.ops.filter((o) => o.kind === "border" && o.a1 === "A1");
+    check("border plan applies style, weight, and color", borderOps.map((o) => o.prop), ["style", "weight", "color"]);
+    ok("border formatting does not offer add-in undo", window.document.getElementById("undoRow").classList.contains("hidden"));
+    ok("border apply explains undo is unavailable", /Add-in Undo is unavailable/.test(window.document.getElementById("banner").textContent), window.document.getElementById("banner").textContent);
+
     /* --- auto-approval must never run destructive operations ----------- */
     console.log("\n-- destructive auto-approval guard --");
     const approvalSelect = window.document.getElementById("selApproval");
@@ -600,7 +646,7 @@ async function main() {
     ok("stop finalizes the turn", window.document.getElementById("btnSend").disabled === false);
     const assistantCount = window.document.querySelectorAll(".msg.assistant .bubble").length;
     const lastAssistant = Array.from(window.document.querySelectorAll(".msg.assistant .bubble")).pop();
-    check("stop leaves a finalised bubble (12 turns)", assistantCount, 12);
+    check("stop leaves a finalised bubble (14 turns)", assistantCount, 14);
     ok("stopped bubble is not left thinking", !lastAssistant.innerHTML.includes("Thinking"), lastAssistant.innerHTML.slice(0, 60));
 
     window.document.getElementById("btnNewChat").click();

@@ -1,6 +1,6 @@
 # Test report
 
-Ran on Node 24 (Windows 11). **316 automated checks across six suites, all passing**, plus
+Ran on Node 24 (Windows 11). **352 automated checks across six suites, all passing**, plus
 a live end-to-end verification against a real **OpenCode 2.1.4** service and the real task
 pane. The automated suites run offline against mock OpenCode services on isolated ports, so
 they can run while the add-in is in use.
@@ -12,12 +12,12 @@ npm run test:e2e  # original curl-driven end-to-end script
 
 | Suite | What it exercises | Checks |
 |---|---|---|
-| `tools/test-lib.mjs` | Pure helpers: markdown rendering, table extraction, A1 maths, escaping, header/column detection, **plan parsing, destructive classification, cell caps, auto-approval, snapshots, formula fills** | **82** |
+| `tools/test-lib.mjs` | Pure helpers: markdown rendering, table extraction, A1 maths, escaping, header/column detection, **plan parsing, destructive classification, cell caps, auto-approval, operation-specific snapshots, formula fills** | **106** |
 | `tools/test-format.mjs` | Native formatter against a fake Excel model: table, summary, number formats, freeze/print, conditional formatting, idempotency, **preflight failure without mutation** | **50** |
 | `tools/test-health.mjs` | Launcher health check, dev CA, strict-vs-CA validation, 503 handling | **7** |
-| `tools/test-starter.mjs` | Starter workbook: embedded add-in ID/version synchronization, valid XML declaration, cross-platform packaged-file validation | **4** |
+| `tools/test-starter.mjs` | Starter workbook: embedded add-in ID/version synchronization, valid XML declaration, ZIP extraction, packaged and prepared-file validation | **7** |
 | `tools/test-bridge.mjs` | Real bridge over HTTP/SSE: discovery, auth, v1 + v2 protocols, models, provider errors, resilience, hardening, **token/origin/host controls, attachment and audit endpoints** | **65** |
-| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **108** |
+| `tools/test-pane.mjs` | The actual `src/taskpane.js` in jsdom with a fake Excel object model, a real bridge and a real SSE stream | **117** |
 
 ## How the pane is tested without Excel
 
@@ -56,8 +56,13 @@ exactly:
 * **structural plans never offer misleading add-in Undo**; the banner directs the user to Excel
   Undo or a backup. A separate cell-only plan shows the add-in Undo row and restores the exact
   before-values
-* **approval guards**: both automatic-approval modes never auto-apply `deleteSheet`, and destructive
-  operations remain unchecked and require explicit selection
+* **formatting undo honesty**: single-cell cell-local formatting is snapshotted and restored;
+  multi-cell, border, row-height, column-width, and autofit formatting are not add-in-undoable
+* **native Format sheet invalidates older snapshots** before it can insert rows or rewrite cells,
+  even when formatting later fails
+* **approval guards**: both automatic-approval modes never auto-apply `deleteSheet` or border,
+  row-height, column-width, and autofit formatting; destructive operations remain unchecked and
+  require explicit selection
 * the formatter's header-only failure leaves the fake sheet unchanged (no inserted rows, header
   rewrites, table, or merge)
 * **attachments**: attached files are listed as chips and their names/content flow into the prompt
@@ -159,6 +164,12 @@ Verified on the user's machine against `http://127.0.0.1:28894` (v2.1.4):
 | 25 | The native formatter inserted rows and rewrote headers before detecting a header-only sheet | Data-row preflight now runs before any mutation |
 | 26 | The bridge listened on `0.0.0.0` and `/api/audit` was unauthenticated | Bind to `127.0.0.1`, inject a per-launch API token into the pane, validate `Origin` and `Host`, and require the token for every API except `/api/status` |
 | 27 | The starter-workbook test reported "starter workbook is missing" on Linux even when the file existed | Non-Windows runs now validate the packaged starter directly with an accurate skip diagnostic |
+| 28 | `formatRange` border changes were classified as undo-safe, but the snapshot never captured borders, so Undo reported success while the border remained | Borders are not add-in-undoable; only single-cell, cell-local formatting is snapshotted |
+| 29 | Multi-cell formatting was classified as undo-safe even though a range-level property read can hide mixed cell formatting | Multi-cell formatting is not add-in-undoable; value/formula snapshots also stop restoring range-level formatting |
+| 30 | Native **Format sheet** could insert rows without clearing older add-in snapshots, leaving Undo pointed at shifted cells | The undo stack is cleared and the undo row hidden before native formatting starts, including partial failures |
+| 31 | `columnWidth`, `rowHeight`, and autofit formatting on one cell passed the five-cell auto-approval gate even though they affect whole columns or rows | Dimension-changing and autofit formatting always require review; auto-approval is limited to cell-local formatting |
+| 32 | The starter test used `tar` to read an `.xlsx` ZIP, so Linux runs checked an empty XML string; the packaged workbook also embedded version `1.0.0.0` while the manifest declared `1.2.0.0` | Use `fflate` for ZIP extraction with explicit errors, validate the packaged and prepared files, and update the packaged reference to `1.2.0.0` |
+| 33 | CI's Windows bridge startup hung inside a PowerShell certificate-install prompt until the health test timed out | Tests generate/use certificate files without touching the OS trust store, and bridge output is printed when startup fails |
 
 ## Not covered (needs your machine)
 

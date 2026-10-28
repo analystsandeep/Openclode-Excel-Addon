@@ -13,10 +13,11 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { getHttpsServerOptions, ensureCertificatesAreInstalled } from "office-addin-dev-certs";
+import { ensureCertificatesAreInstalled, generateCertificates } from "office-addin-dev-certs";
 import { discoverService, authHeaders, ensureWorkspace, workspaceDir } from "./opencode-service.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -25,6 +26,35 @@ const SRC = path.join(ROOT, "src");
 const ASSETS = path.join(ROOT, "assets");
 const PORT = Number(process.env.PORT || 3000);
 const BIND_HOST = "127.0.0.1";
+const CERT_DIR = path.join(os.homedir(), ".office-addin-dev-certs");
+const CERT_PATHS = {
+  ca: path.join(CERT_DIR, "ca.crt"),
+  cert: path.join(CERT_DIR, "localhost.crt"),
+  key: path.join(CERT_DIR, "localhost.key"),
+};
+
+/**
+ * Read the HTTPS certificate files. Normal launches repair and trust the
+ * developer CA. Tests set BRIDGE_SKIP_CERT_INSTALL=1 so they can generate the
+ * files without a blocking PowerShell trust-store prompt (notably on CI).
+ */
+async function loadHttpsOptions() {
+  if (process.env.BRIDGE_SKIP_CERT_INSTALL === "1") {
+    if (!Object.values(CERT_PATHS).every((file) => fs.existsSync(file))) {
+      // generateCertificates refuses to replace an existing CA file, so clear
+      // any partial set first. This path is only used by the test suites.
+      for (const file of Object.values(CERT_PATHS)) fs.rmSync(file, { force: true });
+      await generateCertificates(CERT_PATHS.ca, CERT_PATHS.cert, CERT_PATHS.key);
+    }
+  } else {
+    await ensureCertificatesAreInstalled();
+  }
+  return {
+    ca: fs.readFileSync(CERT_PATHS.ca),
+    cert: fs.readFileSync(CERT_PATHS.cert),
+    key: fs.readFileSync(CERT_PATHS.key),
+  };
+}
 const API_TOKEN = process.env.BRIDGE_API_TOKEN || crypto.randomBytes(32).toString("hex");
 
 let service = { ok: false, url: null, password: null, info: null, source: null, hint: null };
@@ -901,8 +931,7 @@ async function main() {
   let server;
   let scheme = "https";
   try {
-    await ensureCertificatesAreInstalled();
-    const options = await getHttpsServerOptions();
+    const options = await loadHttpsOptions();
     server = https.createServer(options, requestHandler);
   } catch (err) {
     console.warn(`\n[cert] Could not create HTTPS dev certificates (${err.message}).`);

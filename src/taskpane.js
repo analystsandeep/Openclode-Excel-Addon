@@ -1210,6 +1210,11 @@
       chip.disabled = true;
       chip.textContent = "Formatting…";
     }
+    // Native formatting can insert summary rows or rewrite cells. A partial
+    // failure may still have changed the workbook, so every older snapshot can
+    // point at the wrong cells and must be discarded before formatting starts.
+    state.undoStack = [];
+    hideUndoRow();
     try {
       var result = await formatter.formatSheet(Excel, lib, {
         onWarning: function (message) { console.warn("Format sheet:", message); },

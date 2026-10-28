@@ -64,6 +64,7 @@ function startBridge(env, home) {
       XDG_CONFIG_HOME: path.join(home, ".config"),
       OPENCODE_SERVICE_DEFAULT_PORTS: DEFAULT_PORT,
       BRIDGE_API_TOKEN: BRIDGE_TOKEN,
+      BRIDGE_SKIP_CERT_INSTALL: "1",
       PORT: BRIDGE_PORT,
       ...env,
     },

@@ -147,31 +147,43 @@
     }
   }
 
-  // Only these finite, non-destructive operations may bypass review. Workbook
-  // writes, structural edits and object changes always require explicit review.
-  var AUTO_SAFE_OPS = { formatRange: true, autofitRange: true };
+  // These formatting properties are not cell-local. Borders are not captured
+  // by the snapshot, and row/column dimensions (including autofit) affect cells
+  // outside the reviewed range.
+  var NON_LOCAL_FORMAT_KEYS = ["borders", "rowHeight", "columnWidth", "autofitColumns", "autofitRows"];
 
-  // Snapshots can fully restore only the basic cell state changed by these
-  // operations. Clear/merge/sort/row/column/sheet/table/chart operations can
-  // affect metadata or structure that this module deliberately does not claim
-  // to reconstruct.
-  var UNDO_SAFE_OPS = { setValues: true, setFormulas: true, formatRange: true };
+  function formatHasOnlyCellLocalProperties(o) {
+    if (!o || o.op !== "formatRange" || !o.format || typeof o.format !== "object") return false;
+    for (var i = 0; i < NON_LOCAL_FORMAT_KEYS.length; i++) {
+      if (o.format[NON_LOCAL_FORMAT_KEYS[i]] != null) return false;
+    }
+    return true;
+  }
 
   function finiteCellOperation(o) {
     return !!o && Number.isFinite(o.cellCount) && o.cellCount > 0 && o.cellCount <= MAX_PREVIEW_CELLS;
   }
 
+  // Only cell-only writes and single-cell, cell-local formatting can be
+  // restored exactly. A range-level format read can hide mixed cell formatting,
+  // and the snapshot deliberately does not capture borders or dimensions.
   function isUndoSafe(o) {
-    return !!(o && UNDO_SAFE_OPS[o.op] && finiteCellOperation(o));
+    if (!o || !finiteCellOperation(o)) return false;
+    if (o.op === "setValues" || o.op === "setFormulas") return true;
+    return o.op === "formatRange" && o.cellCount === 1 && formatHasOnlyCellLocalProperties(o);
   }
 
+  // Automatic approval is limited to formatting that only affects the reviewed
+  // cells. autofitRange and dimension changes can affect whole rows/columns, so
+  // they always require explicit review.
   function canAutoApply(ops, maxCells) {
     if (!Array.isArray(ops) || !ops.length) return false;
     var limit = Math.min(MAX_PREVIEW_CELLS, Math.max(0, Number(maxCells || 0)));
     var total = 0;
     for (var i = 0; i < ops.length; i++) {
       var o = ops[i];
-      if (!o || o.destructive || !AUTO_SAFE_OPS[o.op] || !finiteCellOperation(o)) return false;
+      if (!o || o.destructive || o.op !== "formatRange" || !finiteCellOperation(o) ||
+          !formatHasOnlyCellLocalProperties(o)) return false;
       total += o.cellCount;
       if (!Number.isFinite(total) || total > limit) return false;
     }
@@ -436,6 +448,22 @@
     return chart;
   }
 
+  /**
+   * State needed to undo one safe operation. Value/formula writes must not
+   * restore formatting: a range-level format read can hide mixed cell state and
+   * would touch rows/columns outside the reviewed cells. Single-cell formatting
+   * captures only the cell-local properties it can restore exactly.
+   */
+  function snapshotRequirements(op) {
+    if (op.op === "setValues" || op.op === "setFormulas") {
+      return { values: true, formulas: true };
+    }
+    if (op.op === "formatRange" && op.cellCount === 1 && formatHasOnlyCellLocalProperties(op)) {
+      return { format: true };
+    }
+    return null;
+  }
+
   /** Read bounded before-state for explicitly undo-safe cell operations. */
   async function snapshotCells(Excel, ops) {
     var bySheet = {};
@@ -449,13 +477,20 @@
       if (!Number.isFinite(count) || count <= 0 || count > MAX_PREVIEW_CELLS) {
         throw new Error("Undo snapshot requires an exact range within the " + MAX_PREVIEW_CELLS + "-cell safety limit.");
       }
+      var needs = snapshotRequirements(o);
+      if (!needs) return;
       var s = o.sheet || "__active__";
-      if (!bySheet[s]) bySheet[s] = [];
-      if (bySheet[s].indexOf(o.range) < 0) bySheet[s].push(o.range);
+      if (!bySheet[s]) bySheet[s] = {};
+      if (!bySheet[s][o.range]) bySheet[s][o.range] = { values: false, formulas: false, format: false };
+      var entry = bySheet[s][o.range];
+      if (needs.values) entry.values = true;
+      if (needs.formulas) entry.formulas = true;
+      if (needs.format) entry.format = true;
     });
     var snap = { sheets: {}, at: new Date().toISOString() };
     for (var sheetName in bySheet) {
-      var addresses = bySheet[sheetName];
+      var requirements = bySheet[sheetName];
+      var addresses = Object.keys(requirements);
       var data = await Excel.run(async function (ctx) {
           var s = (sheetName === "__active__")
             ? ctx.workbook.worksheets.getActiveWorksheet()
@@ -463,9 +498,14 @@
           var items = {};
           addresses.forEach(function (address) {
             var r = s.getRange(address);
-            r.load(["values", "formulas", "numberFormat"]);
-            if (r.format && typeof r.format.load === "function") {
-              r.format.load(["horizontalAlignment", "verticalAlignment", "wrapText", "rowHeight", "columnWidth"]);
+            var need = requirements[address];
+            var load = [];
+            if (need.values) load.push("values");
+            if (need.formulas) load.push("formulas");
+            if (need.format) load.push("numberFormat");
+            if (load.length) r.load(load);
+            if (need.format && r.format && typeof r.format.load === "function") {
+              r.format.load(["horizontalAlignment", "verticalAlignment", "wrapText"]);
               if (r.format.font && typeof r.format.font.load === "function") r.format.font.load(["bold", "italic", "size", "color"]);
               if (r.format.fill && typeof r.format.fill.load === "function") r.format.fill.load("color");
             }
@@ -475,23 +515,24 @@
           var out = {};
           addresses.forEach(function (address) {
             var r = items[address];
-            out[address] = {
-              values: r.values,
-              formulas: r.formulas,
-              numberFormat: r.numberFormat,
-              format: r.format ? {
+            var need = requirements[address];
+            var entry = {};
+            if (need.values) entry.values = r.values;
+            if (need.formulas) entry.formulas = r.formulas;
+            if (need.format) {
+              entry.numberFormat = r.numberFormat;
+              entry.format = r.format ? {
                 horizontalAlignment: r.format.horizontalAlignment,
                 verticalAlignment: r.format.verticalAlignment,
                 wrapText: r.format.wrapText,
-                rowHeight: r.format.rowHeight,
-                columnWidth: r.format.columnWidth,
                 font: r.format.font ? {
                   bold: r.format.font.bold, italic: r.format.font.italic,
                   size: r.format.font.size, color: r.format.font.color,
                 } : null,
                 fill: r.format.fill ? { color: r.format.fill.color } : null,
-              } : null,
-            };
+              } : null;
+            }
+            out[address] = entry;
           });
           return out;
       });
@@ -617,7 +658,7 @@
           if (d.formulas != null) { r.formulas = d.formulas; wrote++; }
           if (d.numberFormat != null) r.numberFormat = d.numberFormat;
           if (d.format && r.format) {
-            ["horizontalAlignment", "verticalAlignment", "wrapText", "rowHeight", "columnWidth"].forEach(function (key) {
+            ["horizontalAlignment", "verticalAlignment", "wrapText"].forEach(function (key) {
               if (d.format[key] != null) r.format[key] = d.format[key];
             });
             if (d.format.font && r.format.font) {
