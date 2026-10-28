@@ -236,3 +236,11 @@ button { color: inherit; }
   .model-select { max-width: 118px; }
   .op-badge { display: none; }
 }
+
+/* Bounded, text-only cell diff; no model content is inserted as HTML. */
+.preview-diff { max-height: 180px; overflow: auto; font-size: 11px; }
+.preview-diff table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.preview-diff th, .preview-diff td { padding: 4px; border: 1px solid var(--line); text-align: left; overflow-wrap: anywhere; }
+.preview-diff th { font-weight: 600; }
+
+#verificationReport { white-space: pre-wrap; padding: 6px; }

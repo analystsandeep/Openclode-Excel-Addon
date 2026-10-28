@@ -12,6 +12,12 @@ conservative: a feature is marked complete only when the add-in has an executabl
 - Workbook-scoped session persistence for saved files.
 - Bounded cross-sheet context containing values, table names, and live formulas.
 - `@SheetName` focus, selected-range context, and cell/range citations in prompts.
+- Explicit user-directed `@range(Sheet!A1:B20)` reads, bounded to three ranges, 500 cells
+  and 12,000 characters per message. Model-requested range reads use an optional structured
+  protocol and require approval before data is read/sent; at most two requests per turn.
+- Explicit bounded `@search("text")` over used-range values/formulas (20 sheets / 5,000 cells /
+  50 results) and direct `@trace(Sheet!A1)` relationships on supported Excel hosts; no external
+  workbook tracing or complete dependency graph.
 - OpenCode Skills/playbooks and visibility into configured MCP/app connections.
 - Web-research prompts through the tools enabled in the OpenCode workspace.
 
@@ -22,6 +28,10 @@ conservative: a feature is marked complete only when the add-in has an executabl
 - Per-operation approval, select-all, and read-only mode. Automatic approval is limited to finite,
   non-destructive, cell-local formatting; border, row-height, column-width, and autofit formatting
   always require review. Destructive, structural, and object operations are never auto-applied.
+- Supported cell-only plans get a bounded before/proposed cell preview and a pre-apply
+  drift check. Supported undo checks post-apply state before restoring. These are non-atomic
+  checks, not protection against every concurrent edit; mixed/structural/unsupported plans and
+  automatic formatting do not get the pre-apply guard.
 - Values, formulas, R1C1 formula fills, clearing, row/column insertion and deletion, sheet add /
   rename / delete, formatting and borders, autofit, merge/unmerge, tables, sorting, basic charts,
   and freeze panes.
@@ -29,8 +39,12 @@ conservative: a feature is marked complete only when the add-in has an executabl
   single-cell, cell-local `formatRange`, with an eight-entry undo stack. Multi-cell formatting,
   borders, row heights, column widths, autofit, merge, sort, clear, row/column, sheet, table, and
   chart operations are not add-in-undoable.
-- For structural edits, use Excel's own Undo where available or restore a backup. All changes are
-  recorded in local JSONL audit records.
+- Bounded post-write readback verifies supported exact writes and flags Excel error value types;
+  relative fills, multiple same-sheet writes and unsupported plans are explicitly unverified.
+- Manual local workbook backup download in plan review where Office supports compressed export,
+  capped at 50 MB. Verify the copy and extension; no automatic restore. For structural edits,
+  use Excel's own Undo where available or restore a verified backup. Changes are recorded in local
+  JSONL audit records.
 - Direct answer/table/formula insertion uses the same snapshot and audit path for the cell writes.
 
 ### Analysis and inputs
@@ -76,8 +90,8 @@ replacement for the administration plane above.
 
 ## Recommended next phases
 
-1. **Retrieval for large workbooks** — workbook index, on-demand range reads, dependency graph, and
-   deterministic formula-audit tools instead of relying only on prompt samples.
+1. **Retrieval for large workbooks** — scalable workbook index, larger searches, dependency graph,
+   and deterministic formula-audit tools beyond the bounded reads and direct traces.
 2. **Complete reversible transactions** — snapshot/restore tables, charts, merged areas, sheet
    visibility, row/column dimensions, conditional formats, and structural edits.
 3. **Document ingestion verification** — integration tests against PDF, DOCX, PPTX, XLSX, and image

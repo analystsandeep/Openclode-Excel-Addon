@@ -303,7 +303,156 @@
     return base + suffix;
   }
 
+  // Explicit, user-requested bounded reads. Names with spaces use Excel's
+  // quoted-sheet syntax, e.g. @range('Sales Data'!A1:B20).
+  function parseRequestedRanges(text) {
+    var requests = [], re = /@range\(([^()]*)\)/gi, match, total = 0;
+    while ((match = re.exec(String(text || "")))) {
+      if (requests.length >= 3) throw new Error("At most 3 @range requests are allowed per message.");
+      var parsed = match[1].trim().match(/^(?:'((?:[^']|'')+)'|([A-Za-z0-9_ .-]+))!\$?([A-Za-z]+)\$?(\d+)(?::\$?([A-Za-z]+)\$?(\d+))?$/);
+      if (!parsed) throw new Error("Invalid @range. Use @range(Sheet1!A1:B10) with an exact sheet and finite A1 range.");
+      var sheet = parsed[1] != null ? parsed[1].replace(/''/g, "'") : parsed[2];
+      var colIndex = function (name) { var n = 0; for (var i = 0; i < name.length; i++) n = n * 26 + name.toUpperCase().charCodeAt(i) - 64; return n; };
+      var c1 = colIndex(parsed[3]), r1 = Number(parsed[4]), c2 = colIndex(parsed[5] || parsed[3]), r2 = Number(parsed[6] || parsed[4]);
+      if (r1 < 1 || r2 < r1 || r2 > 1048576 || c1 < 1 || c2 < c1 || c2 > 16384) throw new Error("Invalid or out-of-bounds @range.");
+      var count = (r2-r1+1)*(c2-c1+1); total += count;
+      if (total > 500) throw new Error("Explicit @range reads are limited to 500 cells total per message.");
+      requests.push({ sheet: sheet, range: parsed[3].toUpperCase()+r1+":"+(parsed[5] || parsed[3]).toUpperCase()+r2, cellCount: count });
+    }
+    var expected = (String(text || "").match(/@range\(/gi) || []).length;
+    if (expected !== requests.length) throw new Error("Invalid @range syntax.");
+    return requests;
+  }
+
+  function parseAgentReadRequest(text) {
+    var trimmed = String(text || "").trim();
+    var fence = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n?```$/i);
+    var payload;
+    try { payload = JSON.parse(fence ? fence[1] : trimmed); } catch { return null; }
+    if (!payload || !Object.prototype.hasOwnProperty.call(payload, "read_ranges")) return null;
+    if (!Array.isArray(payload.read_ranges) || payload.read_ranges.length < 1 || payload.read_ranges.length > 3 || payload.operations != null) throw new Error("Invalid model read request.");
+    var tokens = payload.read_ranges.map(function (item) {
+      if (!item || typeof item.sheet !== "string" || typeof item.range !== "string" || !item.sheet || item.sheet.length > 31 || /[\[\]:*?\\/]/.test(item.sheet) || !/^\$?[A-Za-z]+\$?\d+(?::\$?[A-Za-z]+\$?\d+)?$/.test(item.range)) throw new Error("Invalid model read request: use an exact sheet and finite A1 range.");
+      return "@range('" + item.sheet.replace(/'/g, "''") + "'!" + item.range + ")";
+    }).join(" ");
+    var requests = parseRequestedRanges(tokens);
+    return { tokens: tokens, ranges: requests, reason: typeof payload.reason === "string" ? payload.reason.slice(0, 300) : "" };
+  }
+
+  // Only explicit user-requested direct cell relationships are sent to the
+  // model. Excel 1.12+ / 1.13+ availability varies by host.
+  function parseRequestedTraces(text) {
+    var count = (String(text || "").match(/@trace\(/gi) || []).length;
+    if (!count) return [];
+    if (count > 2) throw new Error("At most 2 @trace requests are allowed per message.");
+    var matches = String(text).match(/@trace\([^()]*\)/gi) || [];
+    if (matches.length !== count) throw new Error("Invalid @trace syntax.");
+    return matches.map(function (token) {
+      var item = parseRequestedRanges(token.replace(/^@trace/i, "@range"))[0];
+      if (!item || item.cellCount !== 1) throw new Error("@trace requires exactly one cell, e.g. @trace(Sheet1!C5).");
+      return item;
+    });
+  }
+
+  async function traceDirectRelations(Excel, request, kind, supported) {
+    if (!supported) return { status: "unsupported", addresses: [] };
+    var phase = "cell";
+    try {
+      return await Excel.run(async function (ctx) {
+        var cell = ctx.workbook.worksheets.getItem(request.sheet).getRange(request.range);
+        cell.load("address");
+        await ctx.sync();
+        phase = "relations";
+        var fn = kind === "precedents" ? cell.getDirectPrecedents : cell.getDirectDependents;
+        if (typeof fn !== "function") return { status: "unsupported", addresses: [] };
+        var areas = fn.call(cell);
+        areas.load("addresses");
+        await ctx.sync();
+        var addresses = Array.isArray(areas.addresses) ? areas.addresses : [];
+        var clipped = addresses.slice(0, 50).map(function (address) { return String(address).slice(0, 500); });
+        return { status: "ok", addresses: clipped, truncated: addresses.length > clipped.length || addresses.some(function (address) { return String(address).length > 500; }) };
+      });
+    } catch (err) {
+      if (phase === "relations" && err && String(err.code || "").toLowerCase() === "itemnotfound") return { status: "none", addresses: [] };
+      throw err;
+    }
+  }
+
+  function parseWorkbookSearch(text) {
+    var count = (String(text || "").match(/@search\(/gi) || []).length;
+    if (!count) return null;
+    var match = String(text).match(/@search\("([^"\r\n]{1,100})"\)/i);
+    if (count !== 1 || !match || !match[1].trim()) throw new Error('Use one @search("text") request with a non-empty term of at most 100 characters.');
+    return match[1];
+  }
+
+  async function searchWorkbook(Excel, term) {
+    return Excel.run(async function (ctx) {
+      var sheets = ctx.workbook.worksheets;
+      sheets.load("items/name");
+      await ctx.sync();
+      if (sheets.items.length > 20) throw new Error("Workbook search is limited to 20 sheets; use explicit @range reads instead.");
+      var ranges = sheets.items.map(function (sheet) { return {sheet: sheet, range: sheet.getUsedRangeOrNullObject()}; });
+      await ctx.sync();
+      ranges = ranges.filter(function (entry) { return !entry.range.isNullObject; });
+      ranges.forEach(function (entry) { entry.range.load(["rowCount", "columnCount", "rowIndex", "columnIndex"]); });
+      await ctx.sync();
+      var cells = ranges.reduce(function (n, entry) { return n + entry.range.rowCount * entry.range.columnCount; }, 0);
+      if (cells > 5000) throw new Error("Workbook used ranges exceed the 5,000-cell search limit; use explicit @range reads instead.");
+      ranges.forEach(function (entry) { entry.range.load(["values", "formulas"]); });
+      await ctx.sync();
+      var matches = [], total = 0, needle = term.toLowerCase();
+      function col(n) { var out = ""; for (n++; n > 0; n = Math.floor((n - 1) / 26)) out = String.fromCharCode(65 + (n - 1) % 26) + out; return out; }
+      ranges.forEach(function (entry) {
+        var range = entry.range;
+        for (var r = 0; r < range.rowCount; r++) for (var c = 0; c < range.columnCount; c++) {
+          var value = range.values[r][c], formula = range.formulas[r][c];
+          var isFormula = typeof formula === "string" && formula.charAt(0) === "=";
+          if (String(value == null ? "" : value).toLowerCase().indexOf(needle) < 0 && (!isFormula || formula.toLowerCase().indexOf(needle) < 0)) continue;
+          total++;
+          if (matches.length < 50) matches.push({sheet: entry.sheet.name, cell: col(range.columnIndex + c) + (range.rowIndex + r + 1), value: String(value == null ? "" : value).slice(0, 100), formula: isFormula ? formula.slice(0, 100) : ""});
+        }
+      });
+      return { term: term, searchedCells: cells, matches: matches, totalMatches: total, truncated: total > matches.length, note: "Literal case-insensitive search of values and formulas in used ranges; matches may have truncated cell text." };
+    });
+  }
+
+  async function readWorkbookBackup(office, maxBytes) {
+    if (!office || !office.context || !office.context.document || typeof office.context.document.getFileAsync !== "function") throw new Error("Workbook export is unavailable in this host.");
+    function resultPromise(start) {
+      return new Promise(function (resolve, reject) {
+        start(function (result) {
+          if (result && String(result.status).toLowerCase() === "succeeded") resolve(result.value);
+          else reject(new Error(result && result.error && result.error.message || "Office workbook export failed."));
+        });
+      });
+    }
+    var file = await resultPromise(function (cb) { office.context.document.getFileAsync(office.FileType.Compressed, { sliceSize: 65536 }, cb); });
+    try {
+      if (!file || !Number.isFinite(file.size) || file.size <= 0 || file.size > maxBytes || !Number.isInteger(file.sliceCount) || file.sliceCount < 1) throw new Error("Workbook backup is empty or exceeds the 50 MB limit.");
+      var chunks = [], received = 0;
+      for (var i = 0; i < file.sliceCount; i++) {
+        var slice = await resultPromise(function (cb) { file.getSliceAsync(i, cb); });
+        var bytes = new Uint8Array(slice.data);
+        received += bytes.length;
+        if (received > maxBytes) throw new Error("Workbook backup exceeds the 50 MB limit.");
+        chunks.push(bytes);
+      }
+      if (received !== file.size) throw new Error("Incomplete workbook backup; no file was prepared.");
+      return chunks;
+    } finally {
+      if (file && typeof file.closeAsync === "function") file.closeAsync(function () {});
+    }
+  }
+
   var api = {
+    parseRequestedRanges: parseRequestedRanges,
+    parseRequestedTraces: parseRequestedTraces,
+    parseAgentReadRequest: parseAgentReadRequest,
+    traceDirectRelations: traceDirectRelations,
+    readWorkbookBackup: readWorkbookBackup,
+    parseWorkbookSearch: parseWorkbookSearch,
+    searchWorkbook: searchWorkbook,
     escapeHtml: escapeHtml,
     escapeAttr: escapeAttr,
     colName: colName,

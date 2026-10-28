@@ -103,6 +103,103 @@ check("rangeCellCount handles rectangles", plan.rangeCellCount("Sheet1!B2:D5"), 
 check("range operation requires an exact sheet", plan.normalizeOp({ op: "clearRange", range: "A1" }).ok, false);
 check("expanded operation set is available", ["clearRange", "addTable", "sortRange", "freezePanes"].every((op) => plan.ALLOWED_OPS.includes(op)), true);
 
+// Whole-row/column safety: never shift just the anchored cell.
+check("A5 plus count normalizes to whole rows", plan.normalizeOp({op:"insertRows",sheet:"S",range:"A5",count:3}).range, "5:7");
+check("B2 plus count normalizes to whole columns", plan.normalizeOp({op:"deleteColumns",sheet:"S",range:"B2",count:2}).range, "B:C");
+check("rectangular row operation rejected", plan.normalizeOp({op:"deleteRows",sheet:"S",range:"A5:C5",count:3}).ok, false);
+check("conflicting row count rejected", plan.normalizeOp({op:"deleteRows",sheet:"S",range:"5:7",count:2}).ok, false);
+check("negative column rejected", plan.normalizeOp({op:"insertColumns",sheet:"S",at:-1}).ok, false);
+check("fractional count rejected", plan.normalizeOp({op:"insertRows",sheet:"S",at:5,count:1.5}).ok, false);
+check("out of bounds row rejected", plan.normalizeOp({op:"insertRows",sheet:"S",at:1048576,count:2}).ok, false);
+check("whole range is destructive and explicit", plan.normalizeOp({op:"insertRows",sheet:"S",range:"A5",count:3,description:"harmless"}).cells, ["S!5:7"]);
+let requested = lib.parseRequestedRanges("Analyze @range('Sales Data'!A1:B2)");
+check("explicit range accepts quoted sheet", requested, [{sheet:"Sales Data",range:"A1:B2",cellCount:4}]);
+function rangeRejected(text) { try { lib.parseRequestedRanges(text); return false; } catch { return true; } }
+check("explicit range rejects whole columns", rangeRejected("@range(S!A:A)"), true);
+check("explicit range rejects >500 cells", rangeRejected("@range(S!A1:A501)"), true);
+check("explicit range rejects worksheet overflow", rangeRejected("@range(S!XFE1)"), true);
+check("explicit range rejects 4 requests", rangeRejected("@range(S!A1) @range(S!A2) @range(S!A3) @range(S!A4)"), true);
+const structuralCalls = [];
+const structuralExcel = { InsertShift: {down:"Down",right:"Right"}, DeleteShiftDirection: {up:"Up",left:"Left"}, run: async function(fn) {
+  return fn({workbook:{worksheets:{getItem:()=>({getRange: address => ({insert: direction => structuralCalls.push([address,direction]),delete:direction=>structuralCalls.push([address,direction])})})}},sync:async()=>{}});
+}};
+await plan.applyOps(structuralExcel,[plan.normalizeOp({op:"insertRows",sheet:"S",range:"A5",count:3}),plan.normalizeOp({op:"deleteColumns",sheet:"S",range:"B2",count:2})]);
+check("structural execution uses whole ranges",structuralCalls,[["5:7","Down"],["B:C","Left"]]);
+
+// Chart API argument order must match Excel.ChartCollection.add(type, sourceData, seriesBy).
+const chartCalls = [];
+const oldGlobalExcel = globalThis.Excel;
+globalThis.Excel = {ChartType:{ColumnClustered:"ColumnClustered"}, ChartSeriesBy:{columns:"Columns"}};
+// plan is loaded in its own sandbox; expose the Excel enum there via a fresh load.
+const chartSandbox = {Excel: globalThis.Excel};
+new Function("globalThis", "window", "module", "Excel", planSrc)(chartSandbox, chartSandbox, undefined, globalThis.Excel);
+const chartPlan = chartSandbox.OpenCodeExcelPlan;
+const sourceRange = { address: "A1:B2" };
+const chartExcel = {run: async fn => fn({workbook:{worksheets:{getItem:()=>({getRange:()=>sourceRange,charts:{add:(...args)=>{chartCalls.push(args);return {};}}})}},sync:async()=>{}})};
+const chartResult = await chartPlan.applyOps(chartExcel, [chartPlan.normalizeOp({op:"addChart",sheet:"S",source:"A1:B2"})]);
+check("chart uses source data as second argument", chartCalls[0] && chartCalls[0][1] === sourceRange, true);
+check("chart uses series direction as third argument", chartCalls[0] && chartCalls[0][2], "Columns");
+check("chart call succeeds in mock", chartResult[0].ok, true);
+globalThis.Excel = oldGlobalExcel;
+let activeFallback = false;
+const missingSheetExcel = {run: async fn => fn({workbook:{worksheets:{getItem:()=>{throw Error("sheet missing")},getActiveWorksheet:()=>{activeFallback=true;return {getRange:()=>({})}}}},sync:async()=>{}})};
+const missingResult = await plan.applyOps(missingSheetExcel,[plan.normalizeOp({op:"setValues",sheet:"Missing",range:"A1",values:[[1]]})]);
+check("missing sheet fails safely", missingResult[0].ok, false);
+check("missing sheet never falls back to active worksheet", activeFallback, false);
+
+// Agent range requests require strict finite addresses and explicit consent in the UI.
+const modelRead = lib.parseAgentReadRequest(JSON.stringify({read_ranges:[{sheet:"Sales",range:"A1:B2"}],reason:"Need data"}));
+check("model read request is bounded and normalized",modelRead.ranges,[{sheet:"Sales",range:"A1:B2",cellCount:4}]);
+function agentRequestRejected(payload) { try { lib.parseAgentReadRequest(JSON.stringify(payload)); return false; } catch { return true; } }
+check("model read rejects whole column",agentRequestRejected({read_ranges:[{sheet:"S",range:"A:A"}]}),true);
+check("model read rejects embedded qualified address",agentRequestRejected({read_ranges:[{sheet:"S",range:"T!A1"}]}),true);
+check("model read rejects mixed write operations",agentRequestRejected({read_ranges:[{sheet:"S",range:"A1"}],operations:[]}),true);
+check("trace parser accepts exact single cell",lib.parseRequestedTraces("@trace('Sales Data'!C5)"),[{sheet:"Sales Data",range:"C5:C5",cellCount:1}]);
+check("trace parser rejects range", (()=>{try{lib.parseRequestedTraces("@trace(S!A1:B2)");return false;}catch{return true;}})(),true);
+const traceRequest = {sheet:"S",range:"A1:A1"};
+let traceMethod = null;
+const traceExcel = {run: async fn => fn({workbook:{worksheets:{getItem:()=>({getRange:()=>({load(){},getDirectPrecedents(){traceMethod="precedents";return {load(){},addresses:["S!B1"]}},getDirectDependents(){traceMethod="dependents";return {load(){},addresses:["S!C1"]}}})})}},sync:async()=>{}})};
+check("direct precedents use Excel relation API",await lib.traceDirectRelations(traceExcel,traceRequest,"precedents",true),{status:"ok",addresses:["S!B1"],truncated:false});
+check("direct dependents use Excel relation API",await lib.traceDirectRelations(traceExcel,traceRequest,"dependents",true),{status:"ok",addresses:["S!C1"],truncated:false});
+check("unsupported host is reported honestly",await lib.traceDirectRelations(traceExcel,traceRequest,"dependents",false),{status:"unsupported",addresses:[]});
+
+const noRelationsExcel = {run:async fn=>{let sync=0;return fn({workbook:{worksheets:{getItem:()=>({getRange:()=>({load(){},getDirectPrecedents(){return {load(){}}}})})}},sync:async()=>{if(++sync===2)throw {code:"ItemNotFound"}}})}};
+check("missing direct relation reported as none",await lib.traceDirectRelations(noRelationsExcel,traceRequest,"precedents",true),{status:"none",addresses:[]});
+const traceMissingSheetExcel = {run:async fn=>fn({workbook:{worksheets:{getItem:()=>({getRange:()=>({load(){}})})}},sync:async()=>{throw {code:"ItemNotFound"}}})};
+check("missing sheet is not mistaken for no dependencies",await (async()=>{try{await lib.traceDirectRelations(traceMissingSheetExcel,traceRequest,"precedents",true);return false;}catch{return true;}})(),true);
+
+const verifyOp = plan.normalizeOp({op:"setValues",sheet:"S",range:"A1:B1",values:[[1,2]]});
+const verifySnapshot = {sheets:{S:{"A1:B1":{values:[[1,3]],formulas:[[1,3]],valueTypes:[["Double","Error"]]}}}};
+const verifyResult = plan.verifyCellResults([verifyOp],verifySnapshot)[0];
+check("post-write mismatch is detected",verifyResult.mismatches,1);
+check("post-write Excel error is identified by value type",verifyResult.errors,[{cell:"S!B1",error:"3"}]);
+check("post-write mismatch is not labelled verified",verifyResult.status,"mismatch");
+const literalSnapshot = {sheets:{S:{"A1:B1":{values:[[1,"#REF!"]],formulas:[[1,"#REF!"]],valueTypes:[["Double","String"]]}}}};
+check("literal error-like string is not an Excel error",plan.verifyCellResults([verifyOp],literalSnapshot)[0].errors,[]);
+
+check("missing Excel error types prevent verified status",plan.verifyCellResults([verifyOp],{sheets:{S:{"A1:B1":{values:[[1,2]],formulas:[[1,2]]}}}})[0].status,"unverified");
+const r1c1Op = plan.normalizeOp({op:"setFormulas",sheet:"S",range:"A1",formula:"=1",formulaR1C1:"=2"});
+check("R1C1 takes priority and stays unverified",plan.verifyCellResults([r1c1Op],{sheets:{S:{"A1":{values:[[2]],formulas:[["=2"]],valueTypes:[["Double"]]}}}})[0].status,"unverified");
+check("overlapping writes are unverified",plan.verifyCellResults([verifyOp,verifyOp],verifySnapshot)[0].status,"unverified");
+check("missing readback cell is unverified",plan.verifyCellResults([verifyOp],{sheets:{S:{"A1:B1":{values:[[1]],formulas:[[1]],valueTypes:[["Double","Double"]]}}}})[0].status,"unverified");
+check("search parser requires explicit quoted term",lib.parseWorkbookSearch('find @search("rent")'),"rent");
+check("search parser rejects unquoted term",(()=>{try{lib.parseWorkbookSearch('@search(rent)');return false;}catch{return true;}})(),true);
+const searchRange = {isNullObject:false,rowCount:2,columnCount:2,rowIndex:3,columnIndex:1,values:[["Rent",22],["other",3]],formulas:[["Rent",22],["other","=RENT()"]],load(){}};
+const searchExcel = {run:async fn=>fn({workbook:{worksheets:{items:[{name:"Data",getUsedRangeOrNullObject:()=>searchRange}],load(){}}},sync:async()=>{}})};
+const searchResult = await lib.searchWorkbook(searchExcel,"rent");
+check("search returns matching addresses and formula",searchResult.matches.map(x=>[x.cell,x.value,x.formula]),[["B4","Rent",""],["C5","3","=RENT()"]]);
+searchRange.rowCount=5001; searchRange.columnCount=1;
+check("search refuses oversized used ranges",await (async()=>{try{await lib.searchWorkbook(searchExcel,"rent");return false;}catch{return true;}})(),true);
+let backupClosed = false;
+const backupFile = {size:3,sliceCount:2,getSliceAsync(i,cb){cb({status:"succeeded",value:{data:i?[3]:[1,2]}})},closeAsync(cb){backupClosed=true;cb({status:"succeeded"})}};
+const backupOffice = {FileType:{Compressed:"compressed"},context:{document:{getFileAsync(type,opts,cb){cb({status:"succeeded",value:backupFile})}}}};
+const backupChunks = await lib.readWorkbookBackup(backupOffice,10);
+check("backup reads all slices in order",backupChunks.map(a=>Array.from(a)),[[1,2],[3]]);
+check("backup closes the Office file",backupClosed,true);
+backupClosed=false;
+check("backup rejects too-large workbook",await (async()=>{try{await lib.readWorkbookBackup(backupOffice,2);return false;}catch{return true;}})(),true);
+check("backup closes on failure",backupClosed,true);
+
 // --- safety gates: classification, caps, auto-approval, undo ---------------
 const mergeOp = plan.normalizeOp({ op: "mergeRange", sheet: "Data", range: "A1:B2" });
 check("merge is destructive", mergeOp.destructive, true);
@@ -279,7 +376,7 @@ const writeSnap = makeRecordingSheet();
 const writeSnapshot = await plan.snapshotCells(writeSnap.Excel, [
   plan.normalizeOp({ op: "setValues", sheet: "Data", range: "A1", values: [[1]] }),
 ]);
-check("value-write snapshot loads only values and formulas", writeSnap.state.loads, [["values", "formulas"]]);
+check("value-write snapshot loads values, formulas and types", writeSnap.state.loads, [["values", "formulas", "valueTypes"]]);
 check("value-write snapshot captures no formatting", Object.keys(writeSnapshot.sheets.Data.A1).sort(), ["formulas", "values"]);
 writeSnap.range.values = [["after"]];
 writeSnap.range.formulas = [["=2+2"]];
@@ -355,6 +452,21 @@ check(
   formulaAssignments.filter(function (item) { return item[0] === "range"; }).length,
   0
 );
+
+// Review diffs and conservative drift checks are computed from frozen snapshots.
+const reviewOps = [plan.normalizeOp({op:"setValues",sheet:"Data",range:"A1:B1",values:[["new",42]]})];
+const oldSnapshot = {sheets:{Data:{"A1:B1":{values:[["old",1]],formulas:[["old",1]]}}}};
+const proposedDiff = plan.previewCellChanges(reviewOps,oldSnapshot,50);
+check("review diff contains exact first cell", proposedDiff.rows[0], {address:"Data!A1",before:"old",after:"new"});
+check("review diff contains exact second cell", proposedDiff.rows[1], {address:"Data!B1",before:"1",after:"42"});
+check("unchanged preview has no conflicts", plan.snapshotConflicts(oldSnapshot,JSON.parse(JSON.stringify(oldSnapshot)),reviewOps), []);
+const changedSnapshot = JSON.parse(JSON.stringify(oldSnapshot)); changedSnapshot.sheets.Data["A1:B1"].values[0][1] = 5;
+check("changed preview detects affected range", plan.snapshotConflicts(oldSnapshot,changedSnapshot,reviewOps), ["Data!A1:B1"]);
+check("missing snapshot fails closed", plan.snapshotConflicts(oldSnapshot,{sheets:{}},reviewOps), ["Data!A1:B1"]);
+check("visual diff respects limit", plan.previewCellChanges(reviewOps,oldSnapshot,1).truncated, true);
+const mergedSnapshot = {sheets:{Data:{"A1:B1":{values:[[1,2]],formulas:[[1,2]],format:{font:{bold:true}},numberFormat:[["General"]]}}}};
+const filtered = plan.selectSnapshot(mergedSnapshot,reviewOps);
+check("failed-format properties excluded from undo snapshot", filtered.sheets.Data["A1:B1"].format, undefined);
 
 // --- sheet formatter helpers ------------------------------------------------
 check(
