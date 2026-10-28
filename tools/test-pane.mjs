@@ -362,6 +362,16 @@ async function main() {
     const buttons = Array.from(window.document.querySelectorAll(".msg.assistant .actions button")).map((b) => b.textContent);
     check("action buttons", buttons, ["Copy", "Insert ↓", "Insert table (4×2)", "Use as formula"]);
 
+    /* --- analytical summary instructions ---------------------------------- */
+    console.log("\n-- analytical summary prompt --");
+    input.value = "summarize this table";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    const summaryPrompt = lastPrompt();
+    ok("summary prompt asks for business insights", summaryPrompt.includes("4 to 6 decision-useful insights"), summaryPrompt.slice(-700));
+    ok("summary prompt avoids formula inventories", summaryPrompt.includes("Do not return a formula inventory"), summaryPrompt.slice(-700));
+    ok("summary prompt requests range citations", summaryPrompt.includes("compact source range citation"), summaryPrompt.slice(-700));
+
     /* --- unavailable default model automatically falls back ---------------- */
     console.log("\n-- free model fallback --");
     const promptsBeforeFallback = requests.filter((r) => /\/api\/prompt$/.test(r.url)).length;
@@ -527,7 +537,7 @@ async function main() {
     ok("stop finalizes the turn", window.document.getElementById("btnSend").disabled === false);
     const assistantCount = window.document.querySelectorAll(".msg.assistant .bubble").length;
     const lastAssistant = Array.from(window.document.querySelectorAll(".msg.assistant .bubble")).pop();
-    check("stop leaves a finalised bubble (8 turns)", assistantCount, 8);
+    check("stop leaves a finalised bubble (9 turns)", assistantCount, 9);
     ok("stopped bubble is not left thinking", !lastAssistant.innerHTML.includes("Thinking"), lastAssistant.innerHTML.slice(0, 60));
 
     window.document.getElementById("btnNewChat").click();

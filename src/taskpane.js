@@ -62,12 +62,23 @@
     "If this task asks to change the workbook, return the reviewable JSON plan described above. Otherwise answer " +
     "in plain text and cite the cells you use (e.g. Sheet1!D12). If the answer is tabular, include a fenced " +
     "```tsv block with a header row.";
+  var SUMMARY_HINT =
+    "This is a data-summary request. Analyze the row-level records, not just the existing summary cells. " +
+    "Start with one short headline covering the scope, period, and main KPI. Then give 4 to 6 decision-useful " +
+    "insights: the strongest meaningful category or region breakdown, the leading product or contributor, a " +
+    "time trend or period comparison when dates are available, and any material outlier. Compute and check the " +
+    "figures from the supplied values; use existing summary cells only to validate totals. Put a compact source " +
+    "range citation at the end of each insight, such as (SaleData!A5:H47). Do not return a formula inventory, " +
+    "do not explain formulas unless asked, and do not use a Markdown table unless the user explicitly requests one. " +
+    "If the available rows are insufficient for a calculation, state that limitation instead of guessing.";
 
   var PREAMBLE =
     "You are an agentic spreadsheet assistant in the OpenCode for Excel sidebar. The user works in a real " +
     "workbook and sees everything you say. Be concise, practical, and audit-friendly. Work with LIVE Excel " +
-    "formulas whenever possible (XLOOKUP, LET, SUMPRODUCT, SUMIFS, ...) instead of pasting static values, and " +
-    "cite every figure back to the exact cells you used, e.g. Sheet1!D12 or tblSales[Amount]. " +
+    "formulas whenever proposing workbook changes (XLOOKUP, LET, SUMPRODUCT, SUMIFS, ...) instead of pasting " +
+    "static values. For analysis requests, report conclusions and calculated results rather than listing formula " +
+    "definitions unless the user asks for them. Cite every figure back to the exact cells you used, e.g. " +
+    "Sheet1!D12 or tblSales[Amount]. " +
     "Never suggest editing files or running shell commands; you operate on spreadsheet data only.\n" +
     "\nWhen the user asks you to CHANGE the workbook (create sheets, write cells or formulas, insert or delete " +
     "rows or columns, format, add charts), reply with NOTHING except a JSON plan in a ```json fence:\n" +
@@ -1081,8 +1092,17 @@
     parts.push("## Task");
     parts.push(question);
     parts.push("");
+    if (isSummaryRequest(question)) {
+      parts.push("## Summary response requirements");
+      parts.push(SUMMARY_HINT);
+      parts.push("");
+    }
     parts.push(state.wantsPlan ? PLAN_HINT : TEXT_HINT);
     return parts.join("\n");
+  }
+
+  function isSummaryRequest(question) {
+    return /\b(summar(?:y|ize|ise|ized|ised|izing|ising)|overview|key insights?|analy[sz]e (?:this|the) (?:table|data|dataset)|what (?:does|do) (?:this|the) (?:table|data) show)\b/i.test(String(question || ""));
   }
 
   var QUICK = {
@@ -1091,7 +1111,7 @@
     explain: { text: "Explain the selected cells or formula step by step, in plain language. Cite the cells involved.", plan: false },
     fix: { text: "The selected formula is broken or returns the wrong result. Diagnose it and give the corrected live formula starting with '='.", plan: false },
     clean: { text: "Clean this data: fix headers, trim whitespace, normalise dates and numbers, remove obvious duplicates. Propose the result as a JSON plan of setValues / formatRange operations the user can review before applying.", plan: true },
-    table: { text: "Summarise the selection as a compact table (```tsv) and add 3 bullet observations. Cite the source cells.", plan: false },
+    table: { text: "Summarise the selected data with a headline and 4 to 6 decision-useful insights covering the main KPI, strongest category or region, leading contributor, time trend, and material outlier. Cite the source range for every insight.", plan: false },
     vba: { text: "Write a VBA macro for this task. Return only the code in a ```vba block plus a one-line usage note.", plan: false },
     pivot: { text: "Recommend the best pivot table layout for this data and give the exact steps plus any formulas needed.", plan: false },
     formula: { text: "Write one live Excel formula that does what I ask. Return only the formula, starting with '='.", plan: false },
