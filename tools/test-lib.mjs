@@ -171,6 +171,147 @@ check("chart uses source data as second argument", chartCalls[0] && chartCalls[0
 check("chart uses series direction as third argument", chartCalls[0] && chartCalls[0][2], "Columns");
 check("chart call succeeds in mock", chartResult[0].ok, true);
 globalThis.Excel = oldGlobalExcel;
+
+// --- Pi-style workbook tools ------------------------------------------------
+const cfBase = {op:"conditionalFormat",sheet:"S",range:"B2:B10",action:"add",
+  rule:{type:"cellValue",operator:">",formula1:"0",format:{fill:"#ffc7ce",color:"#9c0006"}}};
+const cfOp = plan.normalizeOp(cfBase);
+check("conditionalFormat accepts a value rule", cfOp.ok, true);
+check("conditionalFormat normalizes the operator", cfOp.rule.operator, "GreaterThan");
+check("conditionalFormat normalizes fill color", cfOp.rule.format.fill, "#FFC7CE");
+check("conditionalFormat normalizes font color", cfOp.rule.format.color, "#9C0006");
+check("conditionalFormat rejects unknown operators", plan.normalizeOp(Object.assign({}, cfBase, {rule:{type:"cellValue",operator:"~",formula1:"0"}})).ok, false);
+check("conditionalFormat requires formula1", plan.normalizeOp(Object.assign({}, cfBase, {rule:{type:"cellValue",operator:"GreaterThan"}})).ok, false);
+check("conditionalFormat between requires formula2", plan.normalizeOp(Object.assign({}, cfBase, {rule:{type:"cellValue",operator:"Between",formula1:"1"}})).ok, false);
+check("top percent rejects rank above 100", plan.normalizeOp({op:"conditionalFormat",sheet:"S",range:"B2:B10",rule:{type:"topBottom",topBottomType:"TopPercent",rank:101}}).ok, false);
+const cfClear = plan.normalizeOp({op:"conditionalFormat",sheet:"S",range:"B2",action:"clear"});
+check("conditionalFormat clear is destructive", [cfClear.ok, cfClear.destructive], [true, true]);
+check("conditionalFormat requires a sheet and range", plan.normalizeOp({op:"conditionalFormat",range:"B2",action:"clear"}).ok, false);
+
+const cfCalls = [];
+let lastCf = null;
+const cfRange = {
+  conditionalFormats: {
+    add: function (type) {
+      cfCalls.push(type);
+      lastCf = {
+        cellValue: { rule: null, format: { font: {}, fill: {} } },
+        custom: { rule: {}, format: { font: {}, fill: {} } },
+        colorScale: { criteria: null },
+        dataBar: { positiveFormat: {}, barDirection: null },
+        topBottom: { rule: null, format: { font: {}, fill: {} } }
+      };
+      return lastCf;
+    },
+    clearAll: function () { cfCalls.push("clearAll"); }
+  }
+};
+const cfExcel = {
+  ConditionalFormatType: { cellValue: "cellValue", custom: "custom", colorScale: "colorScale", dataBar: "dataBar", topBottom: "topBottom" },
+  ConditionalCellValueOperator: { greaterThan: "greaterThan", between: "between" },
+  ConditionalFormatColorCriterionType: { lowestValue: "lowestValue", highestValue: "highestValue", percent: "percent" },
+  ConditionalDataBarDirection: { leftToRight: "leftToRight" },
+  ConditionalTopBottomCriterionType: { topItems: "topItems" },
+  SheetVisibility: { visible: "Visible", hidden: "Hidden", veryHidden: "VeryHidden" },
+  run: async function (fn) {
+    return fn({ workbook: { worksheets: { getItem: () => ({ getRange: () => cfRange }) } }, sync: async () => {} });
+  }
+};
+const cfResult = await plan.applyOps(cfExcel, [cfOp]);
+check("conditionalFormat add executes", cfResult[0].ok, true);
+check("conditionalFormat uses the cellValue type", cfCalls[0], "cellValue");
+check("conditionalFormat writes the rule", lastCf.cellValue.rule, { formula1: "0", formula2: null, operator: "greaterThan" });
+check("conditionalFormat writes the fill", lastCf.cellValue.format.fill.color, "#FFC7CE");
+const cfClearResult = await plan.applyOps(cfExcel, [cfClear]);
+check("conditionalFormat clear executes", cfClearResult[0].ok, true);
+check("conditionalFormat clear calls clearAll", cfCalls.indexOf("clearAll") >= 0, true);
+const cfScale = plan.normalizeOp({op:"conditionalFormat",sheet:"S",range:"B2:B10",rule:{type:"colorScale",criteria:{minimum:{type:"lowest",color:"#F8696B"},maximum:{type:"highest",color:"#63BE7B"}}}});
+check("colorScale criteria normalize", cfScale.ok, true);
+await plan.applyOps(cfExcel, [cfScale]);
+check("colorScale maps criterion enums", [lastCf.colorScale.criteria.minimum.type, lastCf.colorScale.criteria.maximum.type], ["lowestValue", "highestValue"]);
+
+const viewSheet = {};
+const viewExcel = {
+  SheetVisibility: { visible: "Visible", hidden: "Hidden", veryHidden: "VeryHidden" },
+  run: async function (fn) {
+    return fn({ workbook: { worksheets: { getItem: () => viewSheet } }, sync: async () => {} });
+  }
+};
+const viewOp = plan.normalizeOp({op:"viewSettings",sheet:"S",showGridlines:false,showHeadings:true,tabColor:"#1f3864",visibility:"hidden"});
+check("viewSettings normalizes values", [viewOp.ok, viewOp.tabColor, viewOp.visibility], [true, "#1F3864", "Hidden"]);
+const viewResult = await plan.applyOps(viewExcel, [viewOp]);
+check("viewSettings executes", viewResult[0].ok, true);
+check("viewSettings sets gridlines", viewSheet.showGridlines, false);
+check("viewSettings sets headings", viewSheet.showHeadings, true);
+check("viewSettings sets tab color", viewSheet.tabColor, "#1F3864");
+check("viewSettings sets visibility", viewSheet.visibility, "Hidden");
+check("viewSettings rejects an empty change", plan.normalizeOp({op:"viewSettings",sheet:"S"}).ok, false);
+check("viewSettings rejects a bad color", plan.normalizeOp({op:"viewSettings",sheet:"S",tabColor:"navy"}).ok, false);
+check("viewSettings rejects a bad boolean", plan.normalizeOp({op:"viewSettings",sheet:"S",showGridlines:"sometimes"}).ok, false);
+
+const commentOp = plan.normalizeOp({op:"comments",sheet:"S",range:"B5",action:"add",text:"Please review"});
+check("comments add is valid", commentOp.ok, true);
+check("comments requires a single cell", plan.normalizeOp({op:"comments",sheet:"S",range:"B5:B6",action:"add",text:"x"}).ok, false);
+check("comments requires text", plan.normalizeOp({op:"comments",sheet:"S",range:"B5",action:"add"}).ok, false);
+check("comments caps reply text", plan.normalizeOp({op:"comments",sheet:"S",range:"B5",action:"reply",text:"x".repeat(4001)}).ok, false);
+check("comments delete is destructive", plan.normalizeOp({op:"comments",sheet:"S",range:"B5",action:"delete"}).destructive, true);
+const addedComments = [];
+const commentSheet = { comments: { add: (cell, text) => addedComments.push([cell, text]) } };
+const commentExcel = { run: async fn => fn({ workbook: { worksheets: { getItem: () => commentSheet } }, sync: async () => {} }) };
+const commentResult = await plan.applyOps(commentExcel, [commentOp]);
+check("comments add executes", commentResult[0].ok, true);
+check("comments add writes the cell and text", addedComments[0], ["B5", "Please review"]);
+
+let updatedComment = null;
+const existingComment = {
+  isNullObject: false,
+  content: "old",
+  resolved: false,
+  load: function () {},
+  replies: { items: [], load: function () {}, add: function (text) { this.items.push({ content: text }); }, getItemAt: function () { return { delete: function () {} }; } }
+};
+const updateSheet = {
+  comments: {
+    getItemByCellOrNullObject: function () { updatedComment = existingComment; return existingComment; }
+  }
+};
+const updateExcel = { run: async fn => fn({ workbook: { worksheets: { getItem: () => updateSheet } }, sync: async () => {} }) };
+const updateResult = await plan.applyOps(updateExcel, [plan.normalizeOp({op:"comments",sheet:"S",range:"B5",action:"update",text:"new text"})]);
+check("comments update executes", updateResult[0].ok, true);
+check("comments update writes content", updatedComment.content, "new text");
+
+// Comment reads are opt-in and bounded.
+check("@comments reads the workbook", lib.parseRequestedComments("Summarize @comments"), { scope: "workbook" });
+check("@comments range is normalized", lib.parseRequestedComments("@comments('Sales Data'!A1:B2)"), { scope: "range", sheet: "Sales Data", range: "A1:B2", cellCount: 4 });
+check("@comments rejects multiple requests", (() => { try { lib.parseRequestedComments("@comments @comments"); return false; } catch { return true; } })(), true);
+const commentLog = [];
+const commentsWorkbook = {
+  run: async function (fn) {
+    return fn({
+      workbook: {
+        worksheets: {
+          getItem: () => ({
+            name: "S", load: function () {},
+            comments: {
+              load: function () {},
+              items: [
+                { cellAddress: "B5", content: "Check this", authorName: "Ada", creationDate: "2026-01-01T00:00:00Z", resolved: false, load: function () {}, replies: { items: [{ authorName: "Bob", content: "Done", creationDate: "2026-01-02T00:00:00Z", load: function () {} }], load: function () {} } },
+                { cellAddress: "C20", content: "Outside range", authorName: "Ada", creationDate: null, resolved: true, load: function () {}, replies: { items: [], load: function () {} } }
+              ]
+            }
+          })
+        }
+      },
+      sync: async () => { commentLog.push("sync"); }
+    });
+  }
+};
+const commentRead = await lib.readWorkbookComments(commentsWorkbook, { scope: "range", sheet: "S", range: "B2:B10" });
+check("comment read filters to the range", commentRead.totalThreads, 1);
+check("comment read includes the thread", commentRead.threads[0].cell, "B5");
+check("comment read includes replies", commentRead.threads[0].replies[0].text, "Done");
+check("comment read marks scope", commentRead.scope, "S!B2:B10");
+
 let activeFallback = false;
 const missingSheetExcel = {run: async fn => fn({workbook:{worksheets:{getItem:()=>{throw Error("sheet missing")},getActiveWorksheet:()=>{activeFallback=true;return {getRange:()=>({})}}}},sync:async()=>{}})};
 const missingResult = await plan.applyOps(missingSheetExcel,[plan.normalizeOp({op:"setValues",sheet:"Missing",range:"A1",values:[[1]]})]);
@@ -184,7 +325,10 @@ function agentRequestRejected(payload) { try { lib.parseAgentReadRequest(JSON.st
 check("model read rejects whole column",agentRequestRejected({read_ranges:[{sheet:"S",range:"A:A"}]}),true);
 check("model read rejects embedded qualified address",agentRequestRejected({read_ranges:[{sheet:"S",range:"T!A1"}]}),true);
 check("model read rejects mixed write operations",agentRequestRejected({read_ranges:[{sheet:"S",range:"A1"}],operations:[]}),true);
-check("trace parser accepts exact single cell",lib.parseRequestedTraces("@trace('Sales Data'!C5)"),[{sheet:"Sales Data",range:"C5:C5",cellCount:1}]);
+check("trace parser accepts exact single cell",lib.parseRequestedTraces("@trace('Sales Data'!C5)"),[{sheet:"Sales Data",range:"C5:C5",cellCount:1,mode:"both",depth:1}]);
+check("trace parser accepts direction and depth",lib.parseRequestedTraces("@trace(S!C5, dependents, depth=4)"),[{sheet:"S",range:"C5:C5",cellCount:1,mode:"dependents",depth:4}]);
+check("trace parser accepts documented mode= syntax",lib.parseRequestedTraces("@trace(S!C5, depth=2, mode=precedents)"),[{sheet:"S",range:"C5:C5",cellCount:1,mode:"precedents",depth:2}]);
+check("trace parser rejects unknown mode",(()=>{try{lib.parseRequestedTraces("@trace(S!C5, mode=everything)");return false;}catch{return true;}})(),true);
 check("trace parser rejects range", (()=>{try{lib.parseRequestedTraces("@trace(S!A1:B2)");return false;}catch{return true;}})(),true);
 const traceRequest = {sheet:"S",range:"A1:A1"};
 let traceMethod = null;
@@ -197,6 +341,44 @@ const noRelationsExcel = {run:async fn=>{let sync=0;return fn({workbook:{workshe
 check("missing direct relation reported as none",await lib.traceDirectRelations(noRelationsExcel,traceRequest,"precedents",true),{status:"none",addresses:[]});
 const traceMissingSheetExcel = {run:async fn=>fn({workbook:{worksheets:{getItem:()=>({getRange:()=>({load(){}})})}},sync:async()=>{throw {code:"ItemNotFound"}}})};
 check("missing sheet is not mistaken for no dependencies",await (async()=>{try{await lib.traceDirectRelations(traceMissingSheetExcel,traceRequest,"precedents",true);return false;}catch{return true;}})(),true);
+check("formula reference parser ignores functions and strings",lib.formulaReferences('=SUM(A1:B2)+LOG10(C3)&"A1"',"S"),[
+  {sheet:"S",address:"A1:B2"},
+  {sheet:"S",address:"C3"},
+]);
+const traceCells = {
+  "S!A1": { value: 3, formula: "=B1+1", precedents: ["S!B1"], dependents: [] },
+  "S!B1": { value: 2, formula: "=C1*2", precedents: ["S!C1"], dependents: ["S!A1"] },
+  "S!C1": { value: 1, formula: "", precedents: [], dependents: ["S!B1"] },
+};
+const recursiveTraceExcel = {
+  run: async (fn) => fn({
+    workbook: {
+      worksheets: {
+        getItem: (name) => ({
+          name,
+          load() {},
+          getRange: (address) => {
+            const key = name + "!" + address.replace(/\$/g, "").split(":")[0];
+            const cell = traceCells[key] || { value: null, formula: "", precedents: [], dependents: [] };
+            return {
+              address,
+              values: [[cell.value]],
+              formulas: [[cell.formula]],
+              load() {},
+              getDirectPrecedents() { return { load() {}, addresses: cell.precedents }; },
+              getDirectDependents() { return { load() {}, addresses: cell.dependents }; },
+            };
+          },
+        }),
+      },
+    },
+    sync: async () => {},
+  }),
+};
+const recursiveTrace = await lib.traceRelations(recursiveTraceExcel,{sheet:"S",range:"A1:A1"},"precedents",true,{depth:3});
+check("recursive trace follows precedents to depth",recursiveTrace.tree.relations[0].relations[0].address,"S!C1");
+check("recursive trace reports node count and API source",[recursiveTrace.nodes,recursiveTrace.source],[3,"api"]);
+check("recursive trace stops at the requested depth",(await lib.traceRelations(recursiveTraceExcel,{sheet:"S",range:"B1:B1"},"dependents",true,{depth:1})).tree.relations[0].relations.length,0);
 
 const verifyOp = plan.normalizeOp({op:"setValues",sheet:"S",range:"A1:B1",values:[[1,2]]});
 const verifySnapshot = {sheets:{S:{"A1:B1":{values:[[1,3]],formulas:[[1,3]],valueTypes:[["Double","Error"]]}}}};

@@ -153,10 +153,55 @@ workbooks for the rest of the Excel session. To remove the add-in later:
 * **Search and trace** - `@search("rent")` performs a literal case-insensitive values/formulas
   search across used ranges (maximum 20 sheets and 5,000 cells); at most 50 matches, with
   truncated cell text, are sent to OpenCode. An oversized workbook is rejected rather than
-  searched partially. `@trace(Sheet1!C5)` requests direct in-workbook precedents and dependents
-  for one cell (at most two traces and 12,000 characters). Precedents require ExcelApi 1.12,
-  dependents 1.13; unsupported hosts are reported. Neither feature traverses external workbooks
-  or builds a complete dependency graph. Results and normal context are sent to the provider.
+  searched partially. `@trace(Sheet1!C5)` traces in-workbook precedents and dependents. Add a
+  depth and direction, for example `@trace(Sheet1!C5, depth=3, mode=precedents)`; `mode` accepts
+  `precedents`, `dependents`, or `both` (the default), and depth is clamped to 1-5. The pane
+  prefers Excel's direct relation APIs and falls back to a bounded formula scan, reporting which
+  source was used. A trace is capped at 200 nodes and 50 relations per node; at most two traces
+  and 12,000 characters are sent per message. Precedents require ExcelApi 1.12, dependents 1.13;
+  unsupported hosts are reported. It does not traverse external workbooks or build a complete
+  dependency graph.
+* **Recent-change context** - the eight most recent applies, restores, and native formats are
+  included as read-only context in later prompts, so follow-up requests can refer to what just
+  changed without re-reading the whole workbook.
+* **Comments** - include bare `@comments` to read threaded comments from every sheet, or
+  `@comments(Sheet1!A1:B20)` to limit the read to one finite range. The pane sends at most 50
+  threads, clips each message to 500 characters, and labels the result as untrusted workbook
+  data. Threaded comments require ExcelApi 1.10+ (Microsoft 365 or Excel for the web).
+  The change-plan tools can also add, update, reply to, resolve, reopen, or delete comments with
+  the `comments` operation.
+* **Conditional formatting and sheet views** - change plans support `conditionalFormat` for
+  cell-value, formula, color-scale, data-bar, and top/bottom rules, and can clear rules from a
+  range. The `viewSettings` operation controls gridlines, headings, tab color, and sheet
+  visibility. The native Format sheet action also adds data bars and a red negative-value rule.
+* **Standing instructions and formatting conventions** - the settings menu stores persistent
+  workbook instructions and formatting conventions in this browser. Both are sent with every
+  prompt. Conventions such as `currency: EUR, decimals: 2, negatives: parentheses,
+  date: dd/mm/yyyy` also drive the native Format sheet action's number formats.
+* **Change history** - each applied plan, restore, and native format run is recorded in the
+  settings menu and stored per workbook in IndexedDB (with an in-memory fallback when the host
+  blocks IndexedDB). Up to 30 checkpoints are kept; the newest eight cell snapshots remain
+  restorable after closing and reopening the task pane. Only cell-level snapshots are restorable:
+  **Restore cells** checks for later edits before writing. Native **Format sheet**, structural
+  edits, and object changes invalidate older restore snapshots; use Excel's Undo or a verified
+  backup for those.
+* **Chat sessions and commands** - each workbook keeps up to 20 local chat tabs, with transcripts
+  saved in this browser. Use **+**, **New chat**, or `/new` to start a session, click a tab to
+  switch, and close a tab without deleting the OpenCode session. Type `/` to open a filtered
+  command palette (arrow keys move, Enter/Tab selects, Esc closes). `/compact` starts a fresh
+  session with a bounded summary of the current conversation carried into the next prompt, and
+  `/export` downloads the visible transcript as Markdown. Local commands do not send a model
+  prompt; `/format` and `/undo` perform workbook actions directly, while `/audit` and
+  `/connections` read the local bridge.
+
+  | Command | Purpose |
+  | --- | --- |
+  | `/help`, `/shortcuts`, `/about` | Command list, keyboard help, bridge/host status |
+  | `/new`, `/resume`, `/history`, `/compact`, `/export` | Session tabs, saved chats, change history, compacted context, Markdown export |
+  | `/model [name]`, `/settings`, `/rules`, `/conventions` | OpenCode model and persistent workbook settings |
+  | `/tools`, `/skills`, `/connections`, `/audit` | Workbook tools, OpenCode agents/skills, MCP/app connections, audit log |
+  | `/format`, `/undo`, `/stop`, `/attach` | Run Format sheet, undo the last cell change, stop the turn, attach files |
+
 * **Model** - the model selector lists every model your OpenCode app exposes. The choice is remembered
   and applied to the next message; *Default* lets OpenCode pick.
 * **Agentic edits (change plans)** - when you ask OpenCode to change the workbook
@@ -204,15 +249,17 @@ workbooks for the rest of the Excel session. To remove the add-in later:
   connections. Connected tools remain governed by OpenCode's permissions.
 * **Format sheet** - styles the active sheet directly with Excel.js, without calling the model:
   cleans headers, creates or restyles `tblSales`, adds a three-row summary strip, applies
-  date/quantity/currency formats, freezes the header, hides gridlines, sets landscape print
-  area/titles and adds data bars plus a red negative-value rule. Safe to click again — it
-  reuses the existing table and does not duplicate the summary or conditional formats.
+  date/quantity/currency formats (including any saved formatting conventions), freezes the header,
+  hides gridlines, sets landscape print area/titles and adds data bars plus a red negative-value
+  rule. Safe to click again — it reuses the existing table and does not duplicate the summary or
+  conditional formats.
 * **Insert below** - writes the answer one row below your selection, with one line per row.
 * **Insert table** - appears when the reply contains a table; parses TSV, CSV, or pipe tables and writes them as a real block with autofit.
 * **Use as formula** - appears when the reply is a single line starting with `=`; writes it into the selected cell as a live formula.
 * **Copy** - copies the answer or an individual code block.
 * **Stop** - aborts the turn (`session.interrupt` or `abort`).
-* **New chat** - starts a fresh OpenCode session. History remains in OpenCode.
+* **New chat** - starts a fresh OpenCode session and adds a local chat tab. Earlier tabs remain
+  available until you close them; closing a tab does not delete the OpenCode session.
 * Ctrl or Command plus Enter sends.
 
 ## 5. Locking the agent down (important)

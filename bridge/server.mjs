@@ -847,6 +847,7 @@ function serveStatic(req, res, url) {
     "/lib.js": path.join(SRC, "lib.js"),
     "/plan.js": path.join(SRC, "plan.js"),
     "/format.js": path.join(SRC, "format.js"),
+    "/history.js": path.join(SRC, "history.js"),
   };
 
   let file = candidates[pathname];

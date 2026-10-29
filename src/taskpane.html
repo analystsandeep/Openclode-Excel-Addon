@@ -21,6 +21,11 @@
       </div>
     </header>
 
+    <div id="sessionBar" class="session-bar" aria-label="Chat sessions">
+      <div id="sessionTabs" class="session-tabs"></div>
+      <button id="btnNewSession" class="session-new" title="New chat session" aria-label="New chat session">＋</button>
+    </div>
+
     <div id="settingsPanel" class="panel settings-popover hidden">
       <div class="settings-head">
         <strong>OpenCode settings</strong>
@@ -38,6 +43,18 @@
         <span>Max selected cells sent</span>
         <input id="maxCells" type="number" min="50" max="5000" step="50" value="400" />
       </label>
+      <label class="field">
+        <span>Standing workbook instructions</span>
+        <textarea id="instructionsText" rows="3" maxlength="4000" placeholder="e.g. Fiscal year starts in April. Use the tblSales table as the source of truth."></textarea>
+      </label>
+      <label class="field">
+        <span>Formatting conventions</span>
+        <textarea id="conventionsText" rows="2" maxlength="2000" placeholder='e.g. currency: EUR, decimals: 2, negatives: parentheses, date: dd/mm/yyyy'></textarea>
+      </label>
+      <div class="hint">
+        Instructions and conventions are stored in this browser and sent with every prompt. The native Format sheet
+        action also follows the currency, decimal, negative and date conventions.
+      </div>
       <label class="checkbox">
         <input id="includeWorkbook" type="checkbox" checked />
         <span>Send workbook samples (all sheets: names, used ranges, values, formulas)</span>
@@ -65,9 +82,16 @@
       <div class="settings-links">
         <button id="btnAuditLog" class="link-btn">Audit log</button>
         <button id="btnConnections" class="link-btn">Connections</button>
+        <button id="btnSessionHistory" class="link-btn">Session history</button>
       </div>
       <div id="connectionsList" class="hint hidden"></div>
       <div id="auditLog" class="settings-output hidden"></div>
+
+      <div class="shortcut-title">Change history (this workbook)</div>
+      <div id="checkpointList" class="checkpoint-list"></div>
+      <div class="settings-links">
+        <button id="btnClearCheckpoints" class="link-btn">Clear history</button>
+      </div>
 
       <div class="shortcut-title">Shortcuts</div>
       <div class="shortcut-grid" id="quickActions">
@@ -148,8 +172,9 @@
         <span id="activity">Working…</span>
         <button id="btnStop" class="ghost-btn">Stop</button>
       </div>
+      <div id="commandMenu" class="command-menu hidden" role="listbox" aria-label="Slash commands"></div>
       <div class="composer-box">
-        <textarea id="input" rows="2" placeholder='Ask anything; use @range(Sheet1!A1:B10), @trace(Sheet1!A1), or @search("text")'></textarea>
+        <textarea id="input" rows="2" placeholder='Ask anything; type / for commands, or use @range(Sheet1!A1:B10), @trace(Sheet1!A1), @search("text"), or @comments'></textarea>
         <div class="composer-row">
           <div class="composer-tools">
             <button id="btnAttach" class="round-tool" title="Attach up to 20 files" aria-label="Attach files">＋</button>
@@ -166,6 +191,7 @@
   <script src="lib.js"></script>
   <script src="plan.js"></script>
   <script src="format.js"></script>
+  <script src="history.js"></script>
   <script src="taskpane.js"></script>
 </body>
 </html>

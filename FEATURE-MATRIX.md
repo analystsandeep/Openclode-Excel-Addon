@@ -9,7 +9,10 @@ conservative: a feature is marked complete only when the add-in has an executabl
 ### Workbook agent
 
 - Multi-turn OpenCode sessions with provider/model and Agent selection.
-- Workbook-scoped session persistence for saved files.
+- Workbook-scoped chat tabs (up to 20) with locally persisted transcripts, tab switching,
+  closing, `/resume`, and automatic restore after reopening the pane.
+- Local slash commands and a filtered command palette. `/compact` starts a fresh session with a
+  bounded carried summary; `/export` downloads the visible transcript as Markdown.
 - Bounded cross-sheet context containing values, table names, and live formulas, capped at 30,000
   characters with per-cell clipping. An independent **Send workbook samples** setting can skip all
   sheet reads; the selection checkbox controls only the selected cells.
@@ -18,8 +21,17 @@ conservative: a feature is marked complete only when the add-in has an executabl
   and 12,000 characters per message. Model-requested range reads use an optional structured
   protocol and require approval before data is read/sent; at most two requests per turn.
 - Explicit bounded `@search("text")` over used-range values/formulas (20 sheets / 5,000 cells /
-  50 results) and direct `@trace(Sheet!A1)` relationships on supported Excel hosts; no external
+  50 results) and recursive `@trace(Sheet!A1, depth=1..5, mode=precedents|dependents|both)`
+  with direct Office.js relation APIs and a bounded formula-scan fallback. Traces are capped at
+  200 nodes / 50 relations per node / two traces / 12,000 characters; there is no external
   workbook tracing or complete dependency graph.
+- Explicit bounded `@comments` / `@comments(Sheet!A1:B20)` thread reads (50 threads, 500
+  characters per message, 12,000-character result cap), labelled as untrusted workbook data.
+  Requires ExcelApi 1.10+ (Microsoft 365 or Excel for the web).
+- Workbook map includes sheet names, used ranges, tables, charts, pivot-table names, defined
+  names, and non-visible sheet state.
+- Persistent per-browser standing instructions and formatting conventions are included in every
+  prompt, along with the eight most recent applies/restores/formats as recent-change context.
 - OpenCode Skills/playbooks and visibility into configured MCP/app connections.
 - Web-research prompts through the tools enabled in the OpenCode workspace.
 
@@ -36,11 +48,17 @@ conservative: a feature is marked complete only when the add-in has an executabl
   automatic formatting do not get the pre-apply guard.
 - Values, formulas, R1C1 formula fills, clearing, row/column insertion and deletion, sheet add /
   rename / delete, formatting and borders, autofit, merge/unmerge, tables, sorting, basic charts,
-  and freeze panes.
+  freeze panes, conditional formatting (cell-value, formula, color scale, data bar, top/bottom),
+  sheet view settings (gridlines, headings, tab color, visibility), and threaded comments
+  (add/update/reply/resolve/reopen/delete).
+- Persistent per-workbook change checkpoints stored in IndexedDB (with an in-memory fallback):
+  up to 30 entries, newest eight cell snapshots restorable after reopening the pane, each using
+  the same later-edit drift check as Undo. Native formatting and structural/object changes
+  invalidate older restore snapshots.
 - Bounded before-value/formula snapshots for cell writes and before-formatting snapshots for
   single-cell, cell-local `formatRange`, with an eight-entry undo stack. Multi-cell formatting,
-  borders, row heights, column widths, autofit, merge, sort, clear, row/column, sheet, table, and
-  chart operations are not add-in-undoable.
+  borders, row heights, column widths, autofit, merge, sort, clear, row/column, sheet, table,
+  chart, comment, conditional-format, and view operations are not add-in-undoable.
 - Bounded post-write readback verifies supported exact writes and flags Excel error value types;
   relative fills, multiple same-sheet writes and unsupported plans are explicitly unverified.
 - Manual local workbook backup download in plan review where Office supports compressed export,
@@ -56,8 +74,26 @@ conservative: a feature is marked complete only when the add-in has an executabl
 - Native V2 file attachments: up to 20 files, 25 MB each, stored only in the local scratch
   workspace. Text content is also injected as a fallback.
 - Markdown, tables, code copy, live formula insertion, stop/cancel, model errors, and retries.
-- Native reusable sheet formatter with tables, summary formulas, print setup, and conditional
-  formatting.
+- Native reusable sheet formatter with tables, summary formulas, print setup, conditional
+  formatting, and currency/date/decimal/negative conventions.
+- Native workbook comments are read on request and can be changed through reviewable plans;
+  comment text is never treated as agent instructions.
+
+## Intentionally not implemented (Pi-only)
+
+Every AI call is routed through the local OpenCode bridge. These Pi for Excel capabilities are
+deliberately out of scope rather than partially emulated:
+
+- Multiple AI providers with API-key/OAuth setup and in-add-in model configuration. Provider and
+  model setup stays in OpenCode; the add-in only selects from the exposed OpenCode catalog.
+- Pi's extension API for arbitrary sidebar widgets and third-party UI panels.
+- Python, LibreOffice, and tmux integration bridges. The add-in talks only to Excel/Office.js and
+  the local OpenCode bridge.
+- A shared file workspace with file browsing or editing. Attachments are handed to OpenCode and
+  stay in its scratch workspace; the pane does not expose a file manager.
+- Full-workbook snapshot/restore history. Checkpoints cover bounded cell state plus manual backup
+  download; tables, charts, sheets, comments, conditional formats, and structural changes still
+  require Excel Undo or a verified backup.
 
 ## Partial / host-dependent
 
@@ -92,8 +128,9 @@ replacement for the administration plane above.
 
 ## Recommended next phases
 
-1. **Retrieval for large workbooks** — scalable workbook index, larger searches, dependency graph,
-   and deterministic formula-audit tools beyond the bounded reads and direct traces.
+1. **Retrieval for large workbooks** — scalable workbook index, larger searches, a richer
+   dependency graph, and deterministic formula-audit tools beyond the bounded reads and recursive
+   traces.
 2. **Complete reversible transactions** — snapshot/restore tables, charts, merged areas, sheet
    visibility, row/column dimensions, conditional formats, and structural edits.
 3. **Document ingestion verification** — integration tests against PDF, DOCX, PPTX, XLSX, and image

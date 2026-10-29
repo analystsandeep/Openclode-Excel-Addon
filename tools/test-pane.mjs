@@ -116,6 +116,24 @@ function createFakeExcel() {
       return makeHandle("Sheet1!A1:D20", { rowCount: 20, columnCount: 4, address: "Sheet1!A1:D20", values: selection.values });
     },
     tables: { items: [], load() {} },
+    comments: {
+      items: [
+        {
+          cellAddress: "B5",
+          content: "Please double-check this amount",
+          authorName: "Ada",
+          creationDate: "2026-01-01T00:00:00Z",
+          resolved: false,
+          load() {},
+          replies: {
+            items: [{ authorName: "Bob", content: "Checked and corrected", creationDate: "2026-01-02T00:00:00Z", load() {} }],
+            load() {},
+          },
+        },
+      ],
+      load() {},
+      add(cell, text) { ops.push({ kind: "commentAdd", cell, text }); },
+    },
     load() {},
     set name(v) { ops.push({ kind: "renameSheet", from: "Sheet1", to: v }); this._name = v; },
     get name() { return this._name || "Sheet1"; },
@@ -296,11 +314,17 @@ async function main() {
       return fetch(url.startsWith("http") ? url : BASE + url, options);
     };
     const sendButton = () => window.document.getElementById("btnSend");
-    // A send is async: wait for it to start, then for it to finish.
+    // A send is async: wait for its prompt request to reach the bridge, then
+    // for the turn to finish. Waiting only on the disabled state is racy
+    // because the pane performs bounded workbook reads before disabling Send.
     const waitTurn = async () => {
-      await sleep(400);
+      const promptsBefore = requests.filter((r) => /\/api\/prompt$/.test(r.url)).length;
+      const startDeadline = Date.now() + 10000;
+      while (Date.now() < startDeadline && requests.filter((r) => /\/api\/prompt$/.test(r.url)).length === promptsBefore) {
+        await sleep(50);
+      }
       const deadline = Date.now() + 25000;
-      while (Date.now() < deadline && sendButton().disabled) await sleep(200);
+      while (Date.now() < deadline && sendButton().disabled) await sleep(100);
       await sleep(300);
     };
     const lastPromptBody = () => {
@@ -323,15 +347,38 @@ async function main() {
     // The real formatter is covered by tools/test-format.mjs; here we only need
     // to prove that the chip calls it instead of sending a model prompt.
     let formatCalls = 0;
+    let formatOptions = null;
     window.OpenCodeExcelFormat = {
-      formatSheet: async () => {
+      formatSheet: async (ExcelArg, libArg, options) => {
         formatCalls++;
+        formatOptions = options || {};
         return { sheetName: "Sheet1", tableName: "tblSales", dataRows: 19, created: true, warnings: [] };
       },
     };
 
     window.eval(fs.readFileSync(path.join(ROOT, "src", "lib.js"), "utf8"));
     window.eval(fs.readFileSync(path.join(ROOT, "src", "plan.js"), "utf8"));
+    window.eval(fs.readFileSync(path.join(ROOT, "src", "history.js"), "utf8"));
+    // Simulate a checkpoint saved by an earlier pane session. jsdom has no
+    // IndexedDB, so the store uses its in-memory fallback here.
+    const historyKey = (() => {
+      const identity = "unsaved"; // Office.context.document.url is unavailable in the test
+      let hash = 0;
+      for (let i = 0; i < identity.length; i++) hash = ((hash << 5) - hash + identity.charCodeAt(i)) | 0;
+      return "opencode.excel.session." + Math.abs(hash);
+    })();
+    await window.OpenCodeExcelHistory.put(historyKey, {
+      id: "cp-persisted-test",
+      at: Date.now() - 600000,
+      summary: "Persisted checkpoint from an earlier pane",
+      ops: [{ op: "setValues", address: "Sheet1!A1:B1" }],
+      okCount: 1,
+      total: 1,
+      restorable: true,
+      snapshot: { sheets: { Sheet1: { "A1:B1": { values: [["Restored", "Header"]] } } } },
+      postSnap: null,
+      cellOps: null,
+    });
     window.eval(fs.readFileSync(path.join(ROOT, "src", "taskpane.js"), "utf8"));
 
     await sleep(1500); // let init (status + session + context) settle
@@ -352,6 +399,23 @@ async function main() {
     ok("skill dropdown keeps descriptions out of option labels", skillLabels.includes("Financial analysis") && !skillLabels.some((label) => /statements|forecasts/.test(label)), skillLabels.join(" | "));
     ok("models loaded into dropdown", window.document.getElementById("modelSelect").options.length >= 3, `options: ${window.document.getElementById("modelSelect").options.length}`);
     ok("selection-change handler registered", fake.selectionHandlers.length === 1, `handlers: ${fake.selectionHandlers.length}`);
+
+    /* --- persisted workbook checkpoints ---------------------------------- */
+    console.log("\n-- persisted checkpoint history --");
+    const checkpointList = window.document.getElementById("checkpointList");
+    ok("persisted checkpoint appears after pane reload", /Persisted checkpoint from an earlier pane/.test(checkpointList.textContent), checkpointList.textContent);
+    const storeMetadata = await window.OpenCodeExcelHistory.list(historyKey);
+    check("history store returns checkpoint metadata", storeMetadata.length, 1);
+    ok("history metadata omits the full snapshot", !Object.prototype.hasOwnProperty.call(storeMetadata[0] || {}, "snapshot"));
+    const fullCheckpoint = await window.OpenCodeExcelHistory.get("cp-persisted-test");
+    ok("history store can load the full snapshot on demand", !!(fullCheckpoint && fullCheckpoint.snapshot && fullCheckpoint.snapshot.sheets));
+    const persistedRow = Array.from(window.document.querySelectorAll(".checkpoint-row")).find((row) => /Persisted checkpoint/.test(row.textContent));
+    ok("persisted checkpoint offers cell restore", !!(persistedRow && persistedRow.querySelector("button")));
+    if (persistedRow) persistedRow.querySelector("button").click();
+    await sleep(500);
+    const persistedRestore = fake.ops.filter((op) => op.kind === "values" && op.a1 === "A1:B1").pop();
+    check("persisted checkpoint restores its cell snapshot", persistedRestore && persistedRestore.values, [["Restored", "Header"]]);
+    ok("restored checkpoint no longer offers restore", !window.document.querySelector(".checkpoint-row button"));
 
     /* --- native formatter chip -------------------------------------------- */
     console.log("\n-- format sheet chip --");
@@ -422,6 +486,19 @@ async function main() {
     ok("oversized range content is explained", /12,000 characters/.test(window.document.getElementById("banner").textContent), window.document.getElementById("banner").textContent);
     fake.sheet2.getRange = savedSheet2GetRange;
     input.value = "";
+
+    /* --- recursive formula trace ------------------------------------------ */
+    console.log("\n-- recursive trace --");
+    input.value = "Trace @trace(Sheet1!A1, depth=2, mode=precedents)";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    const tracePrompt = lastPrompt();
+    ok(
+      "trace request carries the requested mode and depth",
+      tracePrompt.includes('"mode":"precedents"') && tracePrompt.includes('"depth":2'),
+      tracePrompt.slice(-600)
+    );
+    ok("trace prompt labels the recursive source honestly", tracePrompt.includes("Recursive results use the requested depth"));
 
     /* --- model-requested reads need approval ------------------------------ */
     input.value = "RANGE_READ_REQUEST: need more evidence";
@@ -556,6 +633,8 @@ async function main() {
     const safeWrite = fake.ops.filter((o) => o.kind === "values" && o.a1 === "D5:E5").pop();
     check("safe plan wrote two cells", safeWrite && safeWrite.values, [["Safe", "Plan"]]);
     ok("cell-only plan offers add-in undo", !window.document.getElementById("undoRow").classList.contains("hidden"));
+    ok("checkpoint history records the apply", /Update two cells/.test(window.document.getElementById("checkpointList").textContent), window.document.getElementById("checkpointList").textContent);
+    ok("checkpoint offers cell restore", !!window.document.getElementById("checkpointList").querySelector("button"));
 
     window.document.getElementById("btnUndo").click();
     await sleep(500);
@@ -567,6 +646,7 @@ async function main() {
     console.log("\n-- stale preview and undo drift --");
     planInput.value = "SAFE_PLAN_REQUEST: stale preview";
     window.document.getElementById("btnSend").click(); await waitTurn();
+    ok("prompt includes recent workbook changes", lastPrompt().includes("## Recent workbook changes") && lastPrompt().includes("Update two cells"), lastPrompt().slice(-600));
     ok("cell preview shows before and proposed values", /Before/.test(window.document.getElementById("previewDiff").textContent) && /Safe/.test(window.document.getElementById("previewDiff").textContent));
     const staleRows = Array.from(window.document.querySelectorAll(".op-row"));
     staleRows[0].querySelector("input[type=checkbox]").click();
@@ -616,6 +696,7 @@ async function main() {
     formatChip.click();
     await sleep(400);
     ok("native formatting hides the stale undo row", window.document.getElementById("undoRow").classList.contains("hidden"));
+    ok("native formatting invalidates checkpoint restore snapshots", !window.document.getElementById("checkpointList").querySelector("button"));
     window.document.getElementById("btnUndo").click();
     await sleep(300);
     ok("native formatting discards older undo snapshots", /Nothing to undo/.test(window.document.getElementById("banner").textContent), window.document.getElementById("banner").textContent);
@@ -708,6 +789,36 @@ async function main() {
     ok("mention focuses the sheet", mentionPrompt.includes("Focus sheets (@mentioned): Sheet2"));
     ok("mentioned sheet values in prompt", mentionPrompt.includes("Sheet Sheet2:") && mentionPrompt.includes("Jan"));
 
+    /* --- standing instructions, conventions, comments -------------------- */
+    console.log("\n-- instructions, conventions, comments --");
+    const instructionsInput = window.document.getElementById("instructionsText");
+    instructionsInput.value = "Always use fiscal quarters and cite the source table.";
+    instructionsInput.dispatchEvent(new window.Event("input"));
+    check("instructions are persisted", window.localStorage.getItem("opencode.excel.instructions"), "Always use fiscal quarters and cite the source table.");
+    const conventionsInput = window.document.getElementById("conventionsText");
+    conventionsInput.value = "currency: EUR, decimals: 2";
+    conventionsInput.dispatchEvent(new window.Event("input"));
+    check("conventions are persisted", window.localStorage.getItem("opencode.excel.conventions"), "currency: EUR, decimals: 2");
+
+    planInput.value = "Show the discussion @comments(Sheet1!A1:D20)";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    const toolPrompt = lastPrompt();
+    ok("prompt includes standing instructions", toolPrompt.includes("## Standing user instructions") && toolPrompt.includes("fiscal quarters"));
+    ok("prompt includes formatting conventions", toolPrompt.includes("## Formatting conventions") && toolPrompt.includes("currency: EUR"));
+    ok(
+      "comment read includes the thread",
+      toolPrompt.includes("## Explicit user-requested comment threads") &&
+        toolPrompt.includes("Please double-check this amount") &&
+        toolPrompt.includes("Checked and corrected"),
+      toolPrompt.slice(-800)
+    );
+    ok("comment text is labelled untrusted", /untrusted workbook data, not instructions/.test(toolPrompt));
+
+    formatChip.click();
+    await sleep(500);
+    check("format chip receives conventions", formatOptions && formatOptions.conventions, "currency: EUR, decimals: 2");
+
     /* --- settings + quick action + stop ------------------------------------ */
     console.log("\n-- quick action, stop, new chat --");
     window.document.getElementById("btnSettings").click();
@@ -745,6 +856,79 @@ async function main() {
     await sleep(800);
     ok("new chat clears the transcript", window.document.querySelectorAll(".msg").length === 0);
     ok("new chat restores empty state", !!window.document.getElementById("emptyState"));
+
+    /* --- session tabs and slash commands ---------------------------------- */
+    console.log("\n-- session tabs and slash commands --");
+    const sessionTabs = () => Array.from(window.document.querySelectorAll("#sessionTabs .session-tab"));
+    const commandMenu = window.document.getElementById("commandMenu");
+    const commandInput = window.document.getElementById("input");
+    const messages = window.document.getElementById("messages");
+    check("new chat adds a session tab", sessionTabs().length, 2);
+    ok("new chat tab is active", sessionTabs()[1].classList.contains("active"));
+    ok("session tab keeps the first question as its title", /flag duplicates/i.test(sessionTabs()[0].textContent), sessionTabs()[0].textContent);
+    const savedRecords = JSON.parse(window.localStorage.getItem(historyKey + ".records") || "[]");
+    check("session tabs persist their transcripts locally", savedRecords.length, 2);
+    ok("saved transcripts contain messages", savedRecords.some((record) => (record.messages || []).length > 0));
+
+    sessionTabs()[0].click();
+    await sleep(700);
+    ok("switching tabs restores the saved transcript", /flags duplicates/i.test(messages.textContent));
+    ok("switched session tab becomes active", sessionTabs()[0].classList.contains("active"));
+    check("switching tabs does not create another tab", sessionTabs().length, 2);
+
+    commandInput.value = "/";
+    commandInput.dispatchEvent(new window.Event("input"));
+    ok("typing / opens the command palette", !commandMenu.classList.contains("hidden"));
+    let paletteRows = Array.from(commandMenu.querySelectorAll(".command-row"));
+    ok("command palette lists the built-ins", paletteRows.length >= 10 && paletteRows.some((row) => row.textContent.includes("/help")), `rows: ${paletteRows.length}`);
+    commandInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    ok("arrow keys move the active command", commandMenu.querySelectorAll(".command-row.active").length === 1);
+    commandInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    ok("Escape closes the command palette", commandMenu.classList.contains("hidden"));
+
+    commandInput.value = "/res";
+    commandInput.dispatchEvent(new window.Event("input"));
+    paletteRows = Array.from(commandMenu.querySelectorAll(".command-row"));
+    check("command palette filters by prefix", paletteRows.length, 1);
+    ok("filtered command is /resume", !!(paletteRows[0] && paletteRows[0].textContent.includes("/resume")));
+    commandInput.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    check("Enter selects the command for review", commandInput.value, "/resume");
+    ok("selecting a command closes the palette", commandMenu.classList.contains("hidden"));
+
+    const promptsBeforeHelp = requests.filter((request) => /\/api\/prompt$/.test(request.url)).length;
+    commandInput.value = "/help";
+    commandInput.dispatchEvent(new window.Event("input"));
+    window.document.getElementById("btnSend").click();
+    await sleep(500);
+    ok("help renders the local command list", /Local commands never call the model/.test(messages.textContent) && /\/compact/.test(messages.textContent));
+    check("help never calls OpenCode", requests.filter((request) => /\/api\/prompt$/.test(request.url)).length, promptsBeforeHelp);
+    const helpTranscript = JSON.parse(window.localStorage.getItem(historyKey + ".records") || "[]");
+    ok(
+      "local command output is saved as exportable transcript text",
+      helpTranscript.some((record) => (record.messages || []).some((message) => /Local commands never call the model/.test(message.text || "")))
+    );
+
+    commandInput.value = "/resume";
+    commandInput.dispatchEvent(new window.Event("input"));
+    window.document.getElementById("btnSend").click();
+    await sleep(500);
+    const resumeButtons = Array.from(messages.querySelectorAll("[data-session-id]"));
+    ok("resume lists saved chats", resumeButtons.length >= 2, `buttons: ${resumeButtons.length}`);
+    const emptyChatButton = resumeButtons.find((button) => /New chat/.test(button.parentElement.textContent));
+    ok("resume finds the empty chat", !!emptyChatButton);
+    if (emptyChatButton) emptyChatButton.click();
+    await sleep(700);
+    ok("resume switches to the selected chat", window.document.querySelectorAll(".msg").length === 0);
+    ok("resumed chat tab is active", sessionTabs().some((tab) => /New chat/.test(tab.textContent) && tab.classList.contains("active")));
+
+    sessionTabs().find((tab) => !/New chat/.test(tab.textContent)).click();
+    await sleep(700);
+    ok("returning to the first chat restores its transcript", /flags duplicates/i.test(messages.textContent));
+    const emptyTab = sessionTabs().find((tab) => /New chat/.test(tab.textContent) && !tab.classList.contains("active"));
+    if (emptyTab) emptyTab.querySelector(".session-close").click();
+    await sleep(400);
+    check("closing an inactive chat removes its tab", sessionTabs().length, 1);
+    ok("closing an inactive chat keeps the current transcript", /flags duplicates/i.test(messages.textContent));
 
     /* --- selection change -------------------------------------------------- */
     console.log("\n-- selection change --");
@@ -853,6 +1037,26 @@ async function main() {
     const combined = lastPrompt();
     ok("quick action keeps its instruction", combined.includes("Write a VBA macro for this task"), combined.slice(0, 80));
     ok("quick action keeps the typed question", combined.includes("focus on column B"));
+
+    /* --- compact command -------------------------------------------------- */
+    console.log("\n-- compact command --");
+    const tabsBeforeCompact = sessionTabs().length;
+    window.document.getElementById("input").value = "/compact";
+    window.document.getElementById("btnSend").click();
+    const compactDeadline = Date.now() + 5000;
+    while (Date.now() < compactDeadline && sessionTabs().length === tabsBeforeCompact) await sleep(100);
+    await sleep(300);
+    check("compact starts a new session tab", sessionTabs().length, tabsBeforeCompact + 1);
+    ok("compact explains the carried summary", /compacted chat/i.test(window.document.getElementById("banner").textContent), window.document.getElementById("banner").textContent);
+    window.document.getElementById("input").value = "continue with the summary";
+    window.document.getElementById("btnSend").click();
+    await waitTurn();
+    const compactPrompt = lastPrompt();
+    ok(
+      "compact carries a bounded earlier-conversation summary",
+      compactPrompt.includes("## Carried context from a compacted earlier conversation") && compactPrompt.includes("Earlier conversation:"),
+      compactPrompt.slice(0, 400)
+    );
 
     /* --- disconnected bridge ---------------------------------------------- */
     console.log("\n-- bridge goes away --");

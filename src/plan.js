@@ -39,8 +39,17 @@
     "insertRows", "deleteRows", "insertColumns", "deleteColumns",
     "formatRange", "autofitRange", "mergeRange", "unmergeRange",
     "addTable", "deleteTable", "sortRange",
-    "addChart", "deleteChart", "freezePanes"
+    "addChart", "deleteChart", "freezePanes",
+    "conditionalFormat", "viewSettings", "comments"
   ];
+
+  var CONDITIONAL_TYPES = ["cellValue", "expression", "colorScale", "dataBar", "topBottom"];
+  var CONDITIONAL_OPERATORS = [
+    "LessThan", "LessThanOrEqualTo", "GreaterThan", "GreaterThanOrEqualTo",
+    "Between", "NotBetween", "EqualTo", "NotEqualTo"
+  ];
+  var SHEET_VISIBILITY = ["Visible", "Hidden", "VeryHidden"];
+  var COMMENT_ACTIONS = ["add", "update", "reply", "resolve", "reopen", "delete", "deleteReply"];
 
   var CHART_TYPES = {
     ColumnClustered: "ColumnClustered",
@@ -222,6 +231,207 @@
     return { sheet: null, ref: String(address || "") };
   }
 
+  function normalizeHexColor(value) {
+    var text = String(value == null ? "" : value).trim();
+    if (!text) return null;
+    if (text.charAt(0) !== "#") text = "#" + text;
+    return /^#[0-9A-Fa-f]{6}$/.test(text) ? text.toUpperCase() : null;
+  }
+
+  function matchChoice(value, choices) {
+    var text = String(value == null ? "" : value).trim();
+    if (!text) return null;
+    for (var i = 0; i < choices.length; i++) {
+      if (choices[i].toLowerCase() === text.toLowerCase()) return choices[i];
+    }
+    return null;
+  }
+
+  function parseBoolean(value) {
+    if (value === true || value === false) return value;
+    if (value === 1 || value === "1" || value === "true") return true;
+    if (value === 0 || value === "0" || value === "false") return false;
+    return null;
+  }
+
+  function normalizeCriterion(criterion) {
+    if (!criterion || typeof criterion !== "object") return null;
+    var aliases = { lowest: "LowestValue", highest: "HighestValue", number: "Number",
+      percent: "Percent", percentile: "Percentile", formula: "Formula" };
+    var raw = String(criterion.type == null ? "" : criterion.type).trim();
+    var type = matchChoice(raw, ["LowestValue", "HighestValue", "Number", "Percent", "Percentile", "Formula"]) ||
+      aliases[raw.toLowerCase()] || null;
+    if (!type) return null;
+    var color = normalizeHexColor(criterion.color);
+    if (!color) return null;
+    return {
+      type: type,
+      formula: criterion.formula != null && String(criterion.formula).trim() !== "" ? String(criterion.formula) : null,
+      color: color
+    };
+  }
+
+  function normalizeConditionalRule(rule) {
+    if (!rule || typeof rule !== "object") return null;
+    var rawType = String(rule.type || "").trim().toLowerCase();
+    var type = rawType === "cellvalue" ? "cellValue"
+      : rawType === "expression" || rawType === "custom" ? "expression"
+      : rawType === "colorscale" ? "colorScale"
+      : rawType === "databar" ? "dataBar"
+      : rawType === "topbottom" ? "topBottom"
+      : null;
+    var out = { type: type, format: null, invalid: [] };
+    if (!type) return out;
+
+    if (rule.format && typeof rule.format === "object") {
+      out.format = {};
+      if (rule.format.bold != null) out.format.bold = !!rule.format.bold;
+      if (rule.format.italic != null) out.format.italic = !!rule.format.italic;
+      if (rule.format.color != null) {
+        out.format.color = normalizeHexColor(rule.format.color);
+        if (!out.format.color) out.invalid.push("format.color");
+      }
+      if (rule.format.fill != null) {
+        out.format.fill = normalizeHexColor(rule.format.fill);
+        if (!out.format.fill) out.invalid.push("format.fill");
+      }
+    }
+
+    if (type === "cellValue") {
+      var operatorAliases = {
+        ">": "GreaterThan", ">=": "GreaterThanOrEqualTo",
+        "<": "LessThan", "<=": "LessThanOrEqualTo",
+        "=": "EqualTo", "==": "EqualTo", "!=": "NotEqualTo", "<>": "NotEqualTo"
+      };
+      var operatorText = String(rule.operator || "").trim();
+      out.operator = matchChoice(operatorText, CONDITIONAL_OPERATORS) || operatorAliases[operatorText] || null;
+      out.formula1 = rule.formula1 != null ? String(rule.formula1).trim() : "";
+      out.formula2 = rule.formula2 != null ? String(rule.formula2).trim() : "";
+    } else if (type === "expression") {
+      out.formula = rule.formula != null ? String(rule.formula).trim() : "";
+    } else if (type === "colorScale") {
+      var criteria = rule.criteria && typeof rule.criteria === "object" ? rule.criteria : {};
+      out.criteria = {
+        minimum: normalizeCriterion(criteria.minimum),
+        midpoint: criteria.midpoint ? normalizeCriterion(criteria.midpoint) : null,
+        maximum: normalizeCriterion(criteria.maximum)
+      };
+      if (!out.criteria.minimum) out.invalid.push("criteria.minimum");
+      if (!out.criteria.maximum) out.invalid.push("criteria.maximum");
+      if (criteria.midpoint && !out.criteria.midpoint) out.invalid.push("criteria.midpoint");
+    } else if (type === "dataBar") {
+      out.color = normalizeHexColor(rule.color || (rule.format && rule.format.fill) || "#638EC6");
+      if (!out.color) out.invalid.push("color");
+    } else if (type === "topBottom") {
+      out.rank = Number(rule.rank);
+      out.topBottomType = matchChoice(rule.topBottomType, ["TopItems", "TopPercent", "BottomItems", "BottomPercent"]) || "TopItems";
+    }
+    return out;
+  }
+
+  function validateConditionalRule(rule) {
+    if (!rule || !rule.type) {
+      return "conditionalFormat rule.type must be one of: " + CONDITIONAL_TYPES.join(", ") + ".";
+    }
+    if (rule.invalid && rule.invalid.length) {
+      return "conditionalFormat has invalid " + rule.invalid.join(", ") + "; use a 6-digit hex color such as #FFC7CE.";
+    }
+    if (rule.type === "cellValue") {
+      if (!rule.operator) {
+        return "conditionalFormat cellValue rule.operator must be one of: " + CONDITIONAL_OPERATORS.join(", ") + ".";
+      }
+      if (!rule.formula1) return "conditionalFormat cellValue rule requires formula1.";
+      if ((rule.operator === "Between" || rule.operator === "NotBetween") && !rule.formula2) {
+        return "conditionalFormat " + rule.operator + " rule requires formula2.";
+      }
+    } else if (rule.type === "expression" && !rule.formula) {
+      return "conditionalFormat expression rule requires formula.";
+    } else if (rule.type === "colorScale") {
+      var keys = ["minimum", "midpoint", "maximum"];
+      for (var i = 0; i < keys.length; i++) {
+        var criterion = rule.criteria && rule.criteria[keys[i]];
+        if (!criterion) continue;
+        if (["Number", "Percent", "Percentile", "Formula"].indexOf(criterion.type) >= 0 && !criterion.formula) {
+          return "conditionalFormat colorScale " + keys[i] + " criterion requires formula for type " + criterion.type + ".";
+        }
+      }
+    } else if (rule.type === "topBottom") {
+      var maxRank = /Percent$/.test(rule.topBottomType) ? 100 : 1000;
+      if (!Number.isInteger(rule.rank) || rule.rank < 1 || rule.rank > maxRank) {
+        return "conditionalFormat " + rule.topBottomType + " rule requires rank between 1 and " + maxRank + ".";
+      }
+    }
+    return null;
+  }
+
+  function validateConditionalOp(o) {
+    if (o.action !== "add" && o.action !== "clear") {
+      return "conditionalFormat action must be add or clear.";
+    }
+    if (o.action === "clear") return null;
+    if (!o.rule) return "conditionalFormat add requires a rule object.";
+    return validateConditionalRule(o.rule);
+  }
+
+  function validateViewSettingsOp(o) {
+    if (!o.sheet) return "viewSettings requires a sheet name.";
+    if (o.showGridlinesInvalid) return "viewSettings showGridlines must be true or false.";
+    if (o.showHeadingsInvalid) return "viewSettings showHeadings must be true or false.";
+    if (o.tabColorInvalid) return "viewSettings tabColor must be a 6-digit hex color such as #1F3864, or automatic to reset it.";
+    if (o.visibilityInvalid) return "viewSettings visibility must be Visible, Hidden, or VeryHidden.";
+    if (o.showGridlines == null && o.showHeadings == null && o.tabColor == null && !o.visibility) {
+      return "viewSettings requires at least one of showGridlines, showHeadings, tabColor, or visibility.";
+    }
+    return null;
+  }
+
+  function validateCommentOp(o) {
+    if (COMMENT_ACTIONS.indexOf(o.action) < 0) {
+      return "comments action must be one of: " + COMMENT_ACTIONS.join(", ") + ".";
+    }
+    if (!/^\$?[A-Z]{1,3}\$?\d+$/i.test(String(o.range || ""))) {
+      return "comments require a single-cell address such as B5.";
+    }
+    if (["add", "update", "reply"].indexOf(o.action) >= 0 && (!o.text || !o.text.trim())) {
+      return "comments " + o.action + " requires non-empty text.";
+    }
+    if (o.action === "deleteReply" && (!Number.isInteger(o.replyIndex) || o.replyIndex < 0)) {
+      return "comments deleteReply requires a zero-based replyIndex.";
+    }
+    if (["add", "update", "reply"].indexOf(o.action) >= 0 && o.text && o.text.length > 4000) {
+      return "comments text exceeds the 4,000-character safety limit.";
+    }
+    return null;
+  }
+
+  function conditionalFormatDescription(o) {
+    var address = o.address || (o.sheet ? o.sheet + "!" + (o.range || "selection") : "the selection");
+    if (o.action === "clear") return "Clear conditional formatting from " + address + ".";
+    var labels = {
+      cellValue: "value", expression: "formula", colorScale: "color-scale",
+      dataBar: "data-bar", topBottom: "top/bottom"
+    };
+    return "Add " + (labels[o.rule && o.rule.type] || "conditional") + " formatting to " + address + ".";
+  }
+
+  function viewSettingsDescription(o) {
+    var bits = [];
+    if (o.showGridlines != null) bits.push("gridlines " + (o.showGridlines ? "on" : "off"));
+    if (o.showHeadings != null) bits.push("headings " + (o.showHeadings ? "on" : "off"));
+    if (o.tabColor != null) bits.push("tab color " + (o.tabColor || "automatic"));
+    if (o.visibility) bits.push("visibility " + o.visibility);
+    return "Update " + (o.sheet || "sheet") + " view settings: " + (bits.join(", ") || "no change") + ".";
+  }
+
+  function commentsDescription(o) {
+    var actions = {
+      add: "Add a comment to", update: "Update the comment on", reply: "Reply to the comment on",
+      resolve: "Resolve the comment on", reopen: "Reopen the comment on",
+      delete: "Delete the comment on", deleteReply: "Delete a reply on"
+    };
+    return (actions[o.action] || "Update the comment on") + " " + (o.address || "the selected cell") + ".";
+  }
+
   function defaultDescription(o, op) {
     switch (o.op) {
       case "addSheet":   return "Add sheet '" + String(op.name || "New Sheet") + "'.";
@@ -244,6 +454,9 @@
       case "addChart":    return "Add " + (o.chartType || "chart") + " from " + (o.source || o.address || "the data") + ".";
       case "deleteChart": return "Delete chart '" + String(o.name || "") + "'.";
       case "freezePanes": return "Freeze " + Number(o.rows || 0) + " row(s) and " + Number(o.columns || 0) + " column(s).";
+      case "conditionalFormat": return conditionalFormatDescription(o);
+      case "viewSettings": return viewSettingsDescription(o);
+      case "comments": return commentsDescription(o);
       default:            return "Edit the workbook.";
     }
   }
@@ -255,6 +468,8 @@
       case "deleteTable": case "deleteChart": return true;
       case "insertRows": case "insertColumns": return true; // shifts existing data
       case "mergeRange": case "unmergeRange": case "sortRange": return true;
+      case "conditionalFormat": return o.action === "clear";
+      case "comments": return o.action === "update" || o.action === "delete" || o.action === "deleteReply";
       default: return false;
     }
   }
@@ -346,6 +561,33 @@
     o.rows = Math.max(0, Number(op.rows || 0));
     o.columns = Math.max(0, Number(op.columns || 0));
 
+    // Pi-style workbook tools ------------------------------------------------
+    o.action = op.action != null ? String(op.action).trim() : null;
+    if (o.op === "conditionalFormat" && !o.action) o.action = "add";
+    if (o.op === "comments" && !o.action) o.action = "add";
+    o.rule = op.rule && typeof op.rule === "object" ? normalizeConditionalRule(op.rule) : null;
+    o.showGridlines = parseBoolean(op.showGridlines);
+    o.showHeadings = parseBoolean(op.showHeadings);
+    o.showGridlinesInvalid = op.showGridlines != null && o.showGridlines == null;
+    o.showHeadingsInvalid = op.showHeadings != null && o.showHeadings == null;
+    o.tabColor = null;
+    if (op.tabColor != null) {
+      var tabText = String(op.tabColor).trim();
+      if (!tabText || /^(auto|automatic|none|reset)$/i.test(tabText)) {
+        o.tabColor = "";
+      } else {
+        o.tabColor = normalizeHexColor(tabText);
+        if (o.tabColor == null) o.tabColorInvalid = true;
+      }
+    }
+    o.visibility = null;
+    if (op.visibility != null && String(op.visibility).trim() !== "") {
+      o.visibility = matchChoice(op.visibility, SHEET_VISIBILITY);
+      if (!o.visibility) o.visibilityInvalid = String(op.visibility).trim();
+    }
+    o.text = op.text != null ? String(op.text) : null;
+    o.replyIndex = op.replyIndex != null ? Number(op.replyIndex) : null;
+
     // Row/column edits must be normalized before execution. Cell-shaped ranges
     // are expanded to whole rows/columns so adjacent data cannot shift apart.
     if (/^(insertRows|deleteRows|insertColumns|deleteColumns)$/.test(o.op)) {
@@ -374,7 +616,7 @@
 
     var needsRange = ["setValues", "setFormulas", "clearRange", "insertRows", "deleteRows",
       "insertColumns", "deleteColumns", "formatRange", "autofitRange", "mergeRange",
-      "unmergeRange", "addTable", "sortRange", "addChart"].indexOf(o.op) >= 0;
+      "unmergeRange", "addTable", "sortRange", "addChart", "conditionalFormat", "comments"].indexOf(o.op) >= 0;
     if (o.ok && needsRange && (!o.sheet || !o.range)) {
       o.ok = false; o.error = o.op + " requires an exact sheet and range.";
     } else if (o.op === "setValues" && o.values == null) {
@@ -387,6 +629,16 @@
       o.ok = false; o.error = "renameSheet requires from and to.";
     } else if (Number.isFinite(o.cellCount) && o.cellCount > MAX_PREVIEW_CELLS) {
       o.ok = false; o.error = o.op + " affects " + o.cellCount + " cells; the safety limit is " + MAX_PREVIEW_CELLS + ".";
+    }
+    if (o.ok) {
+      var toolError = o.op === "conditionalFormat" ? validateConditionalOp(o)
+        : o.op === "viewSettings" ? validateViewSettingsOp(o)
+        : o.op === "comments" ? validateCommentOp(o)
+        : null;
+      if (toolError) {
+        o.ok = false;
+        o.error = toolError;
+      }
     }
     return o;
   }
@@ -485,6 +737,120 @@
         if (spec.color) border.color = spec.color;
       });
     }
+  }
+
+  function excelEnum(Excel, group, member) {
+    var values = Excel && Excel[group];
+    if (!values || member == null) return member;
+    if (values[member] != null) return values[member];
+    var text = String(member);
+    var lower = text.charAt(0).toLowerCase() + text.slice(1);
+    if (values[lower] != null) return values[lower];
+    for (var key in values) {
+      if (String(values[key]).toLowerCase() === text.toLowerCase()) return values[key];
+    }
+    return member;
+  }
+
+  function applyRuleFormat(target, fmt) {
+    if (!target || !fmt) return;
+    if (fmt.bold != null) target.font.bold = fmt.bold;
+    if (fmt.italic != null) target.font.italic = fmt.italic;
+    if (fmt.color) target.font.color = fmt.color;
+    if (fmt.fill) target.fill.color = fmt.fill;
+  }
+
+  function applyConditionalFormat(Excel, sheet, op) {
+    var range = sheet.getRange(op.range);
+    if (op.action === "clear") {
+      range.conditionalFormats.clearAll();
+      return;
+    }
+    var rule = op.rule;
+    var typeMap = {
+      cellValue: "cellValue", expression: "custom", colorScale: "colorScale",
+      dataBar: "dataBar", topBottom: "topBottom"
+    };
+    var cf = range.conditionalFormats.add(excelEnum(Excel, "ConditionalFormatType", typeMap[rule.type]));
+    if (rule.type === "cellValue") {
+      cf.cellValue.rule = {
+        formula1: rule.formula1,
+        formula2: (rule.operator === "Between" || rule.operator === "NotBetween") ? rule.formula2 : null,
+        operator: excelEnum(Excel, "ConditionalCellValueOperator", rule.operator)
+      };
+      applyRuleFormat(cf.cellValue.format, rule.format);
+    } else if (rule.type === "expression") {
+      cf.custom.rule.formula = rule.formula;
+      applyRuleFormat(cf.custom.format, rule.format);
+    } else if (rule.type === "colorScale") {
+      var criteria = {};
+      ["minimum", "midpoint", "maximum"].forEach(function (key) {
+        var criterion = rule.criteria && rule.criteria[key];
+        if (!criterion) return;
+        var needsFormula = ["Number", "Percent", "Percentile", "Formula"].indexOf(criterion.type) >= 0;
+        criteria[key] = {
+          formula: needsFormula ? criterion.formula : null,
+          type: excelEnum(Excel, "ConditionalFormatColorCriterionType", criterion.type),
+          color: criterion.color
+        };
+      });
+      cf.colorScale.criteria = criteria;
+    } else if (rule.type === "dataBar") {
+      cf.dataBar.positiveFormat.fillColor = rule.color;
+      cf.dataBar.barDirection = excelEnum(Excel, "ConditionalDataBarDirection", "LeftToRight");
+    } else if (rule.type === "topBottom") {
+      cf.topBottom.rule = {
+        type: excelEnum(Excel, "ConditionalTopBottomCriterionType", rule.topBottomType),
+        rank: rule.rank
+      };
+      applyRuleFormat(cf.topBottom.format, rule.format);
+    }
+  }
+
+  function applyViewSettings(Excel, sheet, op) {
+    if (op.showGridlines != null) sheet.showGridlines = op.showGridlines;
+    if (op.showHeadings != null) sheet.showHeadings = op.showHeadings;
+    if (op.tabColor != null) sheet.tabColor = op.tabColor;
+    if (op.visibility) sheet.visibility = excelEnum(Excel, "SheetVisibility", op.visibility);
+  }
+
+  async function applyCommentOp(ctx, sheet, op) {
+    if (op.action === "add") {
+      sheet.comments.add(op.range, op.text);
+      return;
+    }
+    var collection = sheet.comments;
+    var comment = typeof collection.getItemByCellOrNullObject === "function"
+      ? collection.getItemByCellOrNullObject(op.range)
+      : collection.getItemByCell(op.range);
+    comment.load(["content", "resolved"]);
+    if (comment.replies) comment.replies.load("items");
+    await ctx.sync();
+    if (comment.isNullObject) throw new Error("No comment found at " + (op.address || op.range) + ".");
+    switch (op.action) {
+      case "update":
+        comment.content = op.text;
+        break;
+      case "reply":
+        comment.replies.add(op.text);
+        break;
+      case "resolve":
+        comment.resolved = true;
+        break;
+      case "reopen":
+        comment.resolved = false;
+        break;
+      case "delete":
+        comment.delete();
+        break;
+      case "deleteReply":
+        if (op.replyIndex == null) throw new Error("deleteReply requires a replyIndex.");
+        comment.replies.getItemAt(op.replyIndex).delete();
+        break;
+      default:
+        throw new Error("Unsupported comment action " + op.action);
+    }
+    await ctx.sync();
   }
 
   function matrix(rows, columns, value) {
@@ -843,6 +1209,15 @@
               if (op.rows > 0) s.freezePanes.freezeRows(op.rows);
               if (op.columns > 0) s.freezePanes.freezeColumns(op.columns);
               if (!op.rows && !op.columns && s.freezePanes.unfreeze) s.freezePanes.unfreeze();
+              break;
+            case "conditionalFormat":
+              applyConditionalFormat(Excel, s, op);
+              break;
+            case "viewSettings":
+              applyViewSettings(Excel, s, op);
+              break;
+            case "comments":
+              await applyCommentOp(ctx, s, op);
               break;
             default:
               throw new Error("Unsupported operation " + op.op);

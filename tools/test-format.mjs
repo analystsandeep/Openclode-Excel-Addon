@@ -478,6 +478,29 @@ async function main() {
   ok("throws a friendly error for a header-only sheet", !!error && /no data rows/i.test(error.message), error && error.message);
   ok("header-only failure does not mutate the sheet", !fake3.ops.some((op) => ["insert", "values", "addTable", "merge"].includes(op.kind)), JSON.stringify(fake3.ops));
 
+  console.log("\n-- formatting conventions --");
+  const eur = formatter.parseConventions("currency: EUR, decimals: 2, negatives: parentheses");
+  check("parses currency code, decimals and negatives", eur.currency, "€#,##0.00;(€#,##0.00)");
+  check("parses integer decimals", eur.integer, "#,##0.00");
+  check("keeps the default with no conventions", formatter.parseConventions("").currency, CURRENCY);
+  check("parses a date format", formatter.parseConventions("date: dd/mm/yyyy").date, "dd/mm/yyyy");
+  check("accepts an explicit currency format", formatter.parseConventions("currency format: #,##0.000 [$€]").currency, "#,##0.000 [$€]");
+  check("keeps red negatives by default", formatter.parseConventions("currency: GBP").currency, "£#,##0;[Red]-£#,##0");
+
+  const convFake = createFakeExcel({ grid: sampleGrid() });
+  await formatter.formatSheet(convFake.Excel, lib, {
+    conventions: "currency: EUR, decimals: 2, negatives: parentheses, date: dd/mm/yyyy",
+  });
+  ok(
+    "conventions drive the currency number format",
+    convFake.ops.some((op) => op.kind === "numberFormat" && op.a1 === "H5:H16" && op.value === "€#,##0.00;(€#,##0.00)"),
+    JSON.stringify(convFake.ops.filter((op) => op.kind === "numberFormat"))
+  );
+  ok(
+    "conventions drive the date number format",
+    convFake.ops.some((op) => op.kind === "numberFormat" && op.a1 === "A5:A16" && op.value === "dd/mm/yyyy")
+  );
+
   console.log(failures ? `\n${failures} FAILURE(S)` : "\nAll formatter tests passed");
   process.exit(failures ? 1 : 0);
 }

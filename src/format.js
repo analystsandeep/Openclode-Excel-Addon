@@ -23,7 +23,79 @@
   };
 
   var CURRENCY = "$#,##0;[Red]-$#,##0";
+  var INTEGER = "#,##0";
+  var DATE_FORMAT = "dd-mmm-yyyy";
   var TABLE_STYLE = "TableStyleMedium2";
+
+  function repeatZero(count) {
+    var out = "";
+    for (var i = 0; i < count; i++) out += "0";
+    return out;
+  }
+
+  // Parse lightweight `key: value` formatting conventions (for example
+  // "currency: EUR, decimals: 2, negatives: parentheses, date: dd/mm/yyyy").
+  // Anything unrecognized keeps the existing, tested defaults.
+  function parseConventions(text) {
+    var out = { currency: CURRENCY, integer: INTEGER, date: DATE_FORMAT };
+    var src = String(text || "").trim();
+    if (!src) return out;
+    var lower = src.toLowerCase();
+
+    var currencyDecimals = null;
+    var cdm = lower.match(/currency\s*decimals?\s*[:=]?\s*([0-4])/);
+    if (cdm) currencyDecimals = Number(cdm[1]);
+    var decimals = null;
+    var dm = lower.match(/(?:^|[\s,;])decimals?\s*[:=]?\s*([0-4])/);
+    if (dm) decimals = Number(dm[1]);
+
+    var symbol = null;
+    var code = lower.match(/\b(usd|eur|gbp|jpy|chf|cad|aud)\b/);
+    if (code) {
+      symbol = { usd: "$", eur: "€", gbp: "£", jpy: "¥", chf: "CHF ", cad: "C$", aud: "A$" }[code[1]];
+    } else if (/€/.test(src)) {
+      symbol = "€";
+    } else if (/£/.test(src)) {
+      symbol = "£";
+    } else if (/¥/.test(src)) {
+      symbol = "¥";
+    } else {
+      var symbolMatch = src.match(/currency\s*(?:symbol)?\s*[:=]\s*([^\s,;]+)/i);
+      if (symbolMatch) {
+        var token = symbolMatch[1].replace(/^["']|["']$/g, "");
+        if (token && token.length <= 4 && !/^[a-z]{3}$/i.test(token)) symbol = token;
+      }
+    }
+
+    var explicit = src.match(/currency(?:\s*format)?\s*[:=]\s*([^\n;]+)/i);
+    if (explicit) {
+      var candidate = explicit[1].trim().replace(/^["']|["']$/g, "");
+      if (/[0#]/.test(candidate) && (/[;]|[$€£¥]|\[Red\]/i.test(candidate))) {
+        out.currency = candidate;
+      }
+    }
+    if (!explicit || out.currency === CURRENCY) {
+      var sym = symbol || "$";
+      var places = currencyDecimals != null ? currencyDecimals : (decimals != null ? decimals : 0);
+      var positive = sym + "#,##0" + (places > 0 ? "." + repeatZero(places) : "");
+      var negative;
+      if (/parenthes/i.test(src)) negative = "(" + positive + ")";
+      else if (/\bminus\b/i.test(src) || /leading minus/i.test(src)) negative = "-" + positive;
+      else negative = "[Red]-" + positive;
+      out.currency = positive + ";" + negative;
+    }
+
+    var date = src.match(/date(?:\s*format)?\s*[:=]\s*([^\n,;]+)/i);
+    if (date) {
+      var dateCandidate = date[1].trim().replace(/^["']|["']$/g, "");
+      if (/[dmy]/i.test(dateCandidate) && dateCandidate.length <= 20) out.date = dateCandidate;
+    }
+
+    if (decimals != null) {
+      out.integer = "#,##0" + (decimals > 0 ? "." + repeatZero(decimals) : "");
+    }
+    return out;
+  }
 
   function apiSupported(version) {
     try {
@@ -75,7 +147,8 @@
     );
   }
 
-  function summaryPairs(tableName, headers, cols, lib) {
+  function summaryPairs(tableName, headers, cols, lib, formats) {
+    formats = formats || { currency: CURRENCY, integer: INTEGER };
     var ref = function (index) {
       return lib.structuredRef(tableName, headers[index]);
     };
@@ -96,28 +169,28 @@
         label: "Orders",
         formula: "=COUNTA(" + ref(hasDate ? cols.date : 0) + ")",
         value: "—",
-        format: "#,##0",
+        format: formats.integer,
         align: "Right",
       },
       {
         label: "Units",
         formula: hasUnits ? "=SUM(" + ref(cols.units) + ")" : null,
         value: "—",
-        format: "#,##0",
+        format: formats.integer,
         align: "Right",
       },
       {
         label: "Revenue",
         formula: hasAmount ? "=SUM(" + ref(cols.amount) + ")" : null,
         value: "—",
-        format: CURRENCY,
+        format: formats.currency,
         align: "Right",
       },
       {
         label: "Avg order",
         formula: hasAmount ? "=IFERROR(AVERAGE(" + ref(cols.amount) + "),0)" : null,
         value: "—",
-        format: CURRENCY,
+        format: formats.currency,
         align: "Right",
       },
       {
@@ -131,14 +204,14 @@
         label: "People",
         formula: cols.people >= 0 ? distinctFormula(ref(cols.people)) : null,
         value: "—",
-        format: "#,##0",
+        format: formats.integer,
         align: "Right",
       },
       {
         label: "Items",
         formula: cols.item >= 0 ? distinctFormula(ref(cols.item)) : null,
         value: "—",
-        format: "#,##0",
+        format: formats.integer,
         align: "Right",
       },
     ];
@@ -165,6 +238,7 @@
   async function formatSheet(Excel, lib, options) {
     if (!Excel || !lib) throw new Error("The formatter is not connected to Excel.");
     options = options || {};
+    var formats = parseConventions(options.conventions != null ? options.conventions : options.conventionsText);
     var warnings = [];
     function warn(message) {
       warnings.push(message);
@@ -329,13 +403,13 @@
         var columnBody = sheet.getRange(colLetter + (headerRow + 1) + ":" + colLetter + lastRow);
 
         if (i === cols.date) {
-          columnBody.numberFormat = "dd-mmm-yyyy";
+          columnBody.numberFormat = formats.date;
           columnBody.format.horizontalAlignment = "Center";
         } else if (i === cols.units) {
-          columnBody.numberFormat = "#,##0";
+          columnBody.numberFormat = formats.integer;
           columnBody.format.horizontalAlignment = "Right";
         } else if (i === cols.amount) {
-          columnBody.numberFormat = CURRENCY;
+          columnBody.numberFormat = formats.currency;
           columnBody.format.horizontalAlignment = "Right";
         } else {
           columnBody.format.horizontalAlignment = "Left";
@@ -345,7 +419,7 @@
       /* summary strip */
       var summary = null;
       if (summaryTop > 0) {
-        var pairs = summaryPairs(tableName, headers, cols, lib);
+        var pairs = summaryPairs(tableName, headers, cols, lib, formats);
         var maxPairs = Math.min(4, Math.floor((lastCol - firstCol + 1) / 2));
 
         var titleRange = sheet.getRange(firstColLetter + summaryTop + ":" + lastColLetter + summaryTop);
@@ -555,6 +629,7 @@
 
   root.OpenCodeExcelFormat = {
     formatSheet: formatSheet,
+    parseConventions: parseConventions,
     colors: COLORS,
     tableStyle: TABLE_STYLE,
   };
