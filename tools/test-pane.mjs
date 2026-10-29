@@ -434,9 +434,10 @@ async function main() {
     console.log("\n-- send + stream --");
     const input = window.document.getElementById("input");
     input.value = "flag duplicates in column B";
-    window.document.getElementById("btnSend").click();
+    input.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 
     await sleep(500);
+    ok("Enter sends from the composer", input.value === "" && window.document.querySelectorAll(".msg.user").length > 0);
     ok("user bubble rendered", !!window.document.querySelector(".msg.user .bubble"));
     ok("stop row visible while streaming", !window.document.getElementById("stopRow").classList.contains("hidden"));
     ok("send button disabled while streaming", window.document.getElementById("btnSend").disabled === true);

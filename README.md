@@ -260,7 +260,7 @@ workbooks for the rest of the Excel session. To remove the add-in later:
 * **Stop** - aborts the turn (`session.interrupt` or `abort`).
 * **New chat** - starts a fresh OpenCode session and adds a local chat tab. Earlier tabs remain
   available until you close them; closing a tab does not delete the OpenCode session.
-* Ctrl or Command plus Enter sends.
+* Enter sends; Shift+Enter adds a new line. Common actions also sit in the chip rail above the composer.
 
 ## 5. Locking the agent down (important)
 

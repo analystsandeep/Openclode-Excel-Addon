@@ -846,7 +846,6 @@ function serveStatic(req, res, url) {
   const candidates = {
     "/taskpane.html": path.join(SRC, "taskpane.html"),
     "/taskpane.js": path.join(SRC, "taskpane.js"),
-    "/taskpane.css": path.join(SRC, "taskpane.css"),
     "/taskpane-clean.css": path.join(SRC, "taskpane-clean.css"),
     "/lib.js": path.join(SRC, "lib.js"),
     "/plan.js": path.join(SRC, "plan.js"),

@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self' data:; frame-src https://*.oaspapps.com; object-src 'none'; base-uri 'none'" />
   <meta name="opencode-excel-bridge-token" content="__OPENCODE_EXCEL_BRIDGE_TOKEN__" />
   <title>OpenCode for Excel</title>
   <link rel="stylesheet" href="taskpane-clean.css" />
@@ -14,23 +15,45 @@
 <body>
   <div id="app">
     <header class="bar">
-      <button id="btnNewChat" class="new-chat-btn" title="Start a new chat">New chat</button>
+      <div class="bar-copy">
+        <div class="bar-title-row">
+          <button id="btnNewChat" class="new-chat-btn" title="Start a new chat">New chat</button>
+          <button id="connectionStatus" class="connection-status" type="button" title="Open connection settings" aria-label="Open connection settings">
+            <span id="headerStatusDot" class="dot checking" aria-hidden="true"></span>
+            <span id="headerStatusText">Checking</span>
+          </button>
+        </div>
+        <section class="context" aria-label="Workbook context">
+          <label class="context-pill" title="Include the selected cells in the prompt. Workbook samples are controlled in Settings.">
+            <input id="includeSelection" type="checkbox" checked />
+            <span class="sheet-glyph" aria-hidden="true">▦</span>
+            <span id="contextInfo" class="context-info">No selection</span>
+          </label>
+          <button id="btnRefreshContext" class="refresh-btn" title="Refresh workbook context" aria-label="Refresh workbook context">↻</button>
+          <div id="ctxSheets" class="ctx-sheets"></div>
+        </section>
+      </div>
       <div class="bar-actions">
-        <button id="btnAttachTop" class="icon-btn" title="Attach files" aria-label="Attach files">📎</button>
-        <button id="btnSettings" class="icon-btn more-btn" title="Settings and shortcuts" aria-label="Settings and shortcuts">•••</button>
+        <button id="btnSettings" class="icon-btn more-btn" title="Settings and shortcuts" aria-label="Settings and shortcuts" aria-haspopup="dialog" aria-controls="settingsPanel" aria-expanded="false">•••</button>
       </div>
     </header>
 
-    <div id="sessionBar" class="session-bar" aria-label="Chat sessions">
+    <div id="sessionBar" class="session-bar hidden" aria-label="Chat sessions">
       <div id="sessionTabs" class="session-tabs"></div>
-      <button id="btnNewSession" class="session-new" title="New chat session" aria-label="New chat session">＋</button>
     </div>
 
-    <div id="settingsPanel" class="panel settings-popover hidden">
+    <div id="settingsPanel" class="panel settings-popover hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
       <div class="settings-head">
-        <strong>OpenCode settings</strong>
-        <span class="subtitle" id="statusText">Connecting…</span>
+        <div>
+          <strong id="settingsTitle">OpenCode settings</strong>
+          <span class="subtitle" id="statusText">Connecting…</span>
+        </div>
+        <button id="btnCloseSettings" class="icon-btn close-btn" type="button" title="Close settings" aria-label="Close settings">×</button>
       </div>
+      <section id="connectionSection" class="connection-section" tabindex="-1" aria-label="Connection details">
+        <div class="shortcut-title">Connection</div>
+        <div id="connectionDetails" class="hint">Checking the local bridge…</div>
+      </section>
       <label class="field">
         <span>Agent</span>
         <select id="agentSelect"><option value="">Default</option></select>
@@ -90,7 +113,7 @@
       <div class="shortcut-title">Change history (this workbook)</div>
       <div id="checkpointList" class="checkpoint-list"></div>
       <div class="settings-links">
-        <button id="btnClearCheckpoints" class="link-btn">Clear history</button>
+        <button id="btnClearCheckpoints" class="link-btn danger-link">Clear history</button>
       </div>
 
       <div class="shortcut-title">Shortcuts</div>
@@ -114,38 +137,70 @@
 
     <main id="messages" class="messages">
       <div class="empty" id="emptyState">
-        <div class="suggested-title">Suggested</div>
-        <button class="chip suggestion" data-action="budget"><span>↳</span> Build a personal budget</button>
-        <button class="chip suggestion" data-action="debt"><span>↳</span> Build a debt payoff planner</button>
-        <button class="chip suggestion" data-action="dashboard"><span>↳</span> Build a personal finance dashboard</button>
+        <div class="empty-card">
+          <div class="suggested-title">Work with this workbook</div>
+          <p class="empty-copy">I can inspect formulas, explain data, and prepare reviewable changes.</p>
+          <div class="empty-actions">
+            <button class="chip suggestion" data-action="format">Format sheet</button>
+            <button class="chip suggestion" data-action="explain">Explain my formulas</button>
+            <button class="chip suggestion" data-action="audit">Audit workbook</button>
+          </div>
+          <div class="syntax-example"><code>@range(Sheet1!A1:B10)</code> · <code>@trace(Sheet1!A1)</code> · <code>/</code> commands</div>
+          <details class="templates">
+            <summary>Templates</summary>
+            <div class="empty-actions">
+              <button class="chip suggestion" data-action="budget">Personal budget</button>
+              <button class="chip suggestion" data-action="debt">Debt payoff planner</button>
+              <button class="chip suggestion" data-action="dashboard">Finance dashboard</button>
+            </div>
+          </details>
+        </div>
       </div>
     </main>
 
     <div id="previewPanel" class="preview-panel hidden">
       <div class="preview-head">
-        <span class="preview-title">Review changes before applying</span>
-        <span id="previewCount" class="preview-badge">0 operations</span>
+        <span class="preview-title">Review changes</span>
+        <details id="previewMore" class="preview-more">
+          <summary title="More plan actions" aria-label="More plan actions">•••</summary>
+          <div class="preview-more-menu">
+            <button id="btnShowPlanJson" class="link-btn">Show plan JSON</button>
+            <button id="btnPrepareBackup" class="link-btn" title="Prepare a local workbook copy before applying changes">Prepare backup</button>
+            <a id="backupDownload" class="link-btn hidden">Download prepared backup</a>
+          </div>
+        </details>
       </div>
+      <div id="previewCount" class="preview-badge">0 operations</div>
       <div id="previewList" class="preview-list"></div>
       <div id="previewDiff" class="preview-diff" aria-live="polite"></div>
-      <div class="preview-actions">
-        <label class="checkbox" style="margin:0; display:inline-flex; align-items:center; gap:6px;">
-          <input id="previewSelectAll" type="checkbox" checked />
-          <span>Select all</span>
-        </label>
-        <button id="btnApplyPlan" class="primary-btn">Apply checked changes</button>
-        <button id="btnCancelPlan" class="ghost-btn">Cancel</button>
-        <button id="btnShowPlanJson" class="link-btn">Show plan JSON</button>
-        <button id="btnPrepareBackup" class="link-btn" title="Prepare a local workbook copy before applying changes">Prepare backup</button>
-        <a id="backupDownload" class="link-btn hidden">Download prepared backup</a>
+      <div id="planDetails" class="plan-details hidden">
+        <textarea id="planEdit" rows="6" style="width:100%; font-family:Consolas,monospace; font-size:12px;"></textarea>
+        <div id="planJsonText" style="white-space:pre-wrap; font-family:Consolas,monospace; font-size:12px; padding:6px; background:var(--code-bg); border:1px solid var(--line); border-radius:4px;"></div>
         <button id="btnApplyEdited" class="link-btn hidden">Review edited plan</button>
       </div>
-      <div id="planDetails" class="plan-details hidden">
-        <textarea id="planEdit" rows="6" style="width:100%; font-family:Consolas,monospace; font-size:11px;"></textarea>
-        <div id="planJsonText" style="white-space:pre-wrap; font-family:Consolas,monospace; font-size:11px; padding:6px; background:var(--code-bg); border:1px solid var(--line); border-radius:4px;"></div>
-      </div>
       <div id="previewNote" class="preview-note"></div>
+      <div class="preview-actions">
+        <label class="checkbox preview-all" style="margin:0; display:inline-flex; align-items:center; gap:6px;" title="Select all operations">
+          <input id="previewSelectAll" type="checkbox" checked aria-label="Select all operations" />
+          <span>All</span>
+        </label>
+        <button id="btnApplyPlan" class="primary-btn">Apply 0/0 checked</button>
+        <button id="btnCancelPlan" class="ghost-btn">Cancel</button>
+      </div>
     </div>
+
+    <div id="banner" class="banner hidden" role="status" aria-live="polite">
+      <span id="bannerIcon" class="banner-icon" aria-hidden="true">!</span>
+      <span id="bannerText" class="banner-text"></span>
+      <button id="btnDismissBanner" class="banner-close" type="button" title="Dismiss message" aria-label="Dismiss message">×</button>
+    </div>
+
+    <nav class="quick-rail" aria-label="Common workbook actions">
+      <button class="chip format-chip" data-action="format">Format sheet</button>
+      <button class="chip" data-action="explain">Explain formula</button>
+      <button class="chip" data-action="fix">Fix formula</button>
+      <button class="chip" data-action="clean">Clean data</button>
+    </nav>
 
     <footer class="composer">
       <div id="attachRow" class="attach-row hidden">
@@ -153,15 +208,6 @@
         <div id="attachChips" class="attach-chips"></div>
         <button id="btnClearAttachments" class="link-btn">Clear</button>
       </div>
-      <section class="context">
-        <label class="context-pill" title="Include the selected cells in the prompt as context. This does not turn off workbook samples; those are controlled in Settings.">
-          <input id="includeSelection" type="checkbox" checked />
-          <span class="sheet-glyph">▦</span>
-          <span id="contextInfo" class="context-info">No selection</span>
-        </label>
-        <button id="btnRefreshContext" class="refresh-btn" title="Refresh workbook context" aria-label="Refresh workbook context">↻</button>
-        <div id="ctxSheets" class="ctx-sheets"></div>
-      </section>
       <div id="verificationReport" class="preview-note hidden" role="status"></div>
       <div id="undoRow" class="stop-row hidden">
         <span id="undoText">Undo last change?</span>
@@ -169,23 +215,26 @@
         <span class="undo-hint" id="undoHint">cell edits only; use Excel Undo or a backup for structural changes</span>
       </div>
       <div id="stopRow" class="stop-row hidden">
-        <span id="activity">Working…</span>
+        <span id="activity" aria-live="polite">Working…</span>
         <button id="btnStop" class="ghost-btn">Stop</button>
       </div>
       <div id="commandMenu" class="command-menu hidden" role="listbox" aria-label="Slash commands"></div>
+      <div id="toolsMenu" class="tools-menu hidden" role="menu" aria-label="Composer tools">
+        <button id="toolAttach" type="button" role="menuitem">Attachments</button>
+        <button id="toolShortcuts" type="button" role="menuitem">Shortcuts</button>
+        <button id="toolNewChat" type="button" role="menuitem">New chat</button>
+      </div>
       <div class="composer-box">
-        <textarea id="input" rows="2" placeholder='Ask anything; type / for commands, or use @range(Sheet1!A1:B10), @trace(Sheet1!A1), @search("text"), or @comments'></textarea>
+        <textarea id="input" rows="1" placeholder="Ask anything — Enter to send · / commands · @ranges"></textarea>
         <div class="composer-row">
           <div class="composer-tools">
-            <button id="btnAttach" class="round-tool" title="Attach up to 20 files" aria-label="Attach files">＋</button>
+            <button id="btnTools" class="tools-trigger" type="button" title="Attachments, shortcuts, and new chat" aria-label="Open composer tools" aria-haspopup="menu" aria-controls="toolsMenu" aria-expanded="false">＋ Tools</button>
             <select id="modelSelect" class="model-select" aria-label="OpenCode model"><option value="">Default model</option></select>
           </div>
           <button id="btnSend" class="send-btn" title="Send" aria-label="Send">↑</button>
         </div>
       </div>
     </footer>
-
-    <div id="banner" class="banner hidden"></div>
   </div>
 
   <script src="lib.js"></script>

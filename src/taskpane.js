@@ -55,6 +55,7 @@
     recentChanges: [],     /* recent applied/restored changes included in prompts */
     commandMatches: [],    /* current slash-command palette matches */
     commandIndex: 0,
+    lastStatus: null,       /* latest bridge status shown in header/settings */
   };
 
   var MODEL_KEY = "opencode.excel.model";
@@ -181,17 +182,23 @@
   var bannerTimer = null;
   function banner(message, kind) {
     var el = $("banner");
-    el.textContent = message;
+    $("bannerText").textContent = message;
+    $("bannerIcon").textContent = kind === "ok" ? "✓" : kind === "err" ? "!" : "i";
     el.className = "banner" + (kind ? " " + kind : "");
     clearTimeout(bannerTimer);
     bannerTimer = setTimeout(function () { el.classList.add("hidden"); }, 6000);
+  }
+
+  function dismissBanner() {
+    clearTimeout(bannerTimer);
+    $("banner").classList.add("hidden");
   }
 
   function resizeComposer() {
     var input = $("input");
     if (!input) return;
     input.style.height = "auto";
-    input.style.height = Math.min(150, Math.max(48, input.scrollHeight || 48)) + "px";
+    input.style.height = Math.min(96, Math.max(40, input.scrollHeight || 40)) + "px";
   }
 
   /* ---------------------------------------------------------------- bridge */
@@ -217,17 +224,20 @@
   async function checkStatus() {
     try {
       var status = await api("/api/status");
-      state.connected = !!status.connected;
       setStatus(status);
       return status;
     } catch (err) {
-      state.connected = false;
       setStatus({ connected: false, hint: "Bridge not reachable. Is `npm run dev` running?" });
       return null;
     }
   }
 
   function setStatus(status) {
+    status = status || { connected: false };
+    var wasConnected = state.lastStatus && state.lastStatus.connected;
+    var firstStatus = !state.lastStatus;
+    state.connected = !!status.connected;
+    state.lastStatus = status;
     var text = $("statusText");
     var dot = '<span class="dot ' + (status.connected ? "ok" : "err") + '"></span>';
     if (status.connected) {
@@ -235,8 +245,22 @@
       text.innerHTML = dot + label;
     } else {
       text.innerHTML = dot + "Not connected";
-      if (status.hint) banner(status.hint, "err");
+      if ((firstStatus || wasConnected) && status.hint) banner("Can't reach OpenCode — start it or fix settings.", "err");
     }
+    $("headerStatusDot").className = "dot " + (status.connected ? "ok" : "err");
+    $("headerStatusText").textContent = status.connected ? "Connected" : "Offline";
+    $("connectionStatus").title = status.connected
+      ? "OpenCode is connected. Open connection settings."
+      : "OpenCode is offline. Open connection settings.";
+    var details = [];
+    details.push(status.connected ? "OpenCode is connected." : "OpenCode is not connected.");
+    details.push("Start or restart the bridge: npm run dev");
+    if (status.port) details.push("Bridge: https://localhost:" + status.port);
+    if (status.url) details.push("OpenCode: " + status.url);
+    if (status.source) details.push("Discovered via: " + status.source);
+    if (status.workspace) details.push("Workspace: " + status.workspace);
+    if (status.hint) details.push("Details: " + status.hint);
+    $("connectionDetails").textContent = details.join("\n");
   }
 
   async function ensureSession() {
@@ -450,6 +474,7 @@
     var el = $("sessionTabs");
     if (!el) return;
     el.textContent = "";
+    $("sessionBar").classList.toggle("hidden", state.sessionRecords.length <= 1);
     state.sessionRecords.forEach(function (record) {
       var tab = document.createElement("div");
       tab.className = "session-tab" + (record.id === state.activeRecordID ? " active" : "");
@@ -828,6 +853,9 @@
       try { parsedPlan = plan.parsePlan(answerText); } catch (err) { parsedPlan = null; }
     }
     if (parsedPlan && parsedPlan.ok) {
+      // The review panel is the readable, actionable representation of a plan.
+      // Keep the raw JSON behind "Show plan JSON" instead of filling the chat.
+      msg.innerHTML = "";
       var note = document.createElement("div");
       note.className = "plan-summary";
       note.textContent = parsedPlan.summary + " — " + parsedPlan.operations.length + " operation(s) to review.";
@@ -948,7 +976,7 @@
     switch (op) {
       case "addSheet": return "+";
       case "renameSheet": return "↻";
-      case "deleteSheet": return "−";
+      case "deleteSheet": return "⌫";
       case "setValues": return "✎";
       case "setFormulas": return "fx";
       case "insertRows": return "⇣";
@@ -982,6 +1010,8 @@
       cb.checked = !op.destructive && !state.readOnly;
       if (state.readOnly) cb.disabled = true;
       cb._opIndex = index;
+      cb.setAttribute("aria-label", "Select " + (op.description || op.label));
+      cb.addEventListener("change", updatePlanSelection);
 
       var icon = document.createElement("span");
       icon.className = "op-icon";
@@ -1008,9 +1038,9 @@
     });
 
     var nDestructive = parsedPlan.operations.filter(function (o) { return o.destructive; }).length;
-    var countText = parsedPlan.cellCount === Infinity ? "structural" : parsedPlan.cellCount + " cell(s)";
-    $("previewCount").textContent = parsedPlan.operations.length + " operation(s) · " + countText +
-      (nDestructive ? " · " + nDestructive + " destructive" : "");
+    $("previewCount").textContent = parsedPlan.operations.length + " operation(s)" +
+      (nDestructive ? " · " + nDestructive + " destructive" : "") +
+      (parsedPlan.cellCount === Infinity ? " · structural" : "");
 
     var note = $("previewNote");
     if (state.readOnly) {
@@ -1020,13 +1050,12 @@
     } else {
       note.textContent = "Check the operations you want to apply, then click Apply checked changes.";
     }
+    $("app").classList.add("reviewing");
     $("previewPanel").classList.remove("hidden");
     $("btnApplyPlan").disabled = state.readOnly;
-    var boxes = list.querySelectorAll('input[type="checkbox"]');
-    var checked = Array.prototype.filter.call(boxes, function (box) { return box.checked; }).length;
-    $("previewSelectAll").checked = boxes.length > 0 && checked === boxes.length;
-    $("previewSelectAll").indeterminate = checked > 0 && checked < boxes.length;
+    updatePlanSelection();
 
+    $("previewMore").open = false;
     $("planEdit").value = state.planJson || "";
     $("planJsonText").textContent = state.planJson || "";
     $("planDetails").classList.add("hidden");
@@ -1091,6 +1120,8 @@
   }
 
   function hidePreview() {
+    $("app").classList.remove("reviewing");
+    $("previewMore").open = false;
     $("previewPanel").classList.add("hidden");
     state.currentPlan = null;
     state.planJson = null;
@@ -1332,6 +1363,15 @@
     }
   }
 
+  function updatePlanSelection() {
+    var boxes = $("previewList").querySelectorAll('input[type="checkbox"]');
+    var checked = Array.prototype.filter.call(boxes, function (box) { return box.checked; }).length;
+    $("previewSelectAll").checked = boxes.length > 0 && checked === boxes.length;
+    $("previewSelectAll").indeterminate = checked > 0 && checked < boxes.length;
+    $("btnApplyPlan").textContent = "Apply " + checked + "/" + boxes.length + " checked";
+    $("btnApplyPlan").setAttribute("aria-label", "Apply " + checked + " of " + boxes.length + " checked changes");
+  }
+
   function invalidateCheckpointSnapshots() {
     state.checkpoints.forEach(function (entry) {
       entry.snapshot = null;
@@ -1554,7 +1594,9 @@
     if (!inExcel()) {
       state.context = null;
       $("contextInfo").textContent = "Preview mode - open inside Excel to use the selection";
+      $("contextInfo").title = "Preview mode - open inside Excel to use the selection";
       $("ctxSheets").innerHTML = "";
+      refreshEmptyState();
       return;
     }
     try {
@@ -1741,7 +1783,9 @@
     var c = state.context;
     if (!c) {
       $("contextInfo").textContent = "No context";
+      $("contextInfo").title = "No workbook context available";
       $("ctxSheets").innerHTML = "";
+      refreshEmptyState();
       return;
     }
     var flags = [];
@@ -1752,8 +1796,9 @@
     if (!contextOption("includeWorkbook", true)) flags.push("workbook samples off");
     var flagText = flags.length ? "  ·  " + flags.join("  ·  ") : "";
     var addressRef = String(c.address || "").split("!").pop();
-    $("contextInfo").textContent =
-      c.sheet + "!" + addressRef + "  ·  " + c.rowCount + "×" + c.columnCount + flagText;
+    var contextLabel = c.sheet + "!" + addressRef + "  ·  " + c.rowCount + "×" + c.columnCount + flagText;
+    $("contextInfo").textContent = contextLabel;
+    $("contextInfo").title = contextLabel;
 
     var chips = "";
     if (contextOption("includeWorkbook", true)) {
@@ -1762,10 +1807,18 @@
         chips += '<span class="ctx-chip">' + escapeHtml(s.name) + (marked ? " @" : "") + "</span>";
       });
       if (!chips) chips = '<span class="ctx-chip">none</span>';
-      $("ctxSheets").innerHTML = '<span style="font-size:11px;color:var(--text-soft);margin-right:6px;">Workbook:</span>' + chips;
+      $("ctxSheets").innerHTML = '<span style="font-size:12px;color:var(--text-soft);margin-right:6px;">Workbook:</span>' + chips;
     } else {
-      $("ctxSheets").innerHTML = '<span style="font-size:11px;color:var(--text-soft);margin-right:6px;">Workbook samples off</span>';
+      $("ctxSheets").innerHTML = '<span style="font-size:12px;color:var(--text-soft);margin-right:6px;">Workbook samples off</span>';
     }
+    refreshEmptyState();
+  }
+
+  function refreshEmptyState() {
+    var messages = $("messages");
+    if (!messages || state.streaming || messages.querySelector(".msg")) return;
+    messages.innerHTML = suggestionsHtml();
+    wireQuickActions(messages);
   }
 
   async function refreshContext() {
@@ -2092,6 +2145,7 @@
       row.type = "button";
       row.className = "command-row" + (index === state.commandIndex ? " active" : "");
       row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", index === state.commandIndex ? "true" : "false");
       var name = document.createElement("span");
       name.className = "command-name";
       name.textContent = command.name;
@@ -2141,7 +2195,7 @@
   }
 
   function showShortcuts() {
-    addMessage("assistant", "<p><b>Ctrl/Cmd+Enter</b> sends. <b>↑/↓</b> moves through the slash-command menu, <b>Tab</b> or <b>Enter</b> selects, and <b>Esc</b> closes it.</p>" +
+    addMessage("assistant", "<p><b>Enter</b> sends and <b>Shift+Enter</b> adds a new line. <b>↑/↓</b> moves through the slash-command menu, <b>Tab</b> or <b>Enter</b> selects, and <b>Esc</b> closes it.</p>" +
       "<p>Each workbook keeps up to " + MAX_SESSION_RECORDS + " chat tabs. Cell-level changes keep a restorable snapshot; structural edits use Excel Undo or a backup.</p>");
   }
 
@@ -2203,11 +2257,47 @@
     return banner("That model is not available in the current OpenCode catalog.", "warn");
   }
 
+  var settingsReturnFocus = null;
+  function settingsFocusable() {
+    return Array.prototype.slice.call($("settingsPanel").querySelectorAll(
+      'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )).filter(function (el) { return !el.classList.contains("hidden"); });
+  }
+
   function openSettings(focusID) {
-    $("settingsPanel").classList.remove("hidden");
-    if (focusID && $(focusID)) {
-      try { $(focusID).focus(); } catch (err) { /* ignore */ }
-      if (typeof $(focusID).scrollIntoView === "function") $(focusID).scrollIntoView({ block: "nearest" });
+    var panel = $("settingsPanel");
+    if (panel.classList.contains("hidden")) {
+      settingsReturnFocus = document.activeElement && document.activeElement !== document.body
+        ? document.activeElement
+        : $("btnSettings");
+    }
+    panel.classList.remove("hidden");
+    $("btnSettings").setAttribute("aria-expanded", "true");
+    var target = focusID && $(focusID);
+    if (!target) target = settingsFocusable()[0] || panel;
+    setTimeout(function () {
+      try { target.focus(); } catch (err) { /* ignore */ }
+      if (typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "nearest" });
+    }, 0);
+  }
+
+  function closeSettings(restoreFocus) {
+    $("settingsPanel").classList.add("hidden");
+    $("btnSettings").setAttribute("aria-expanded", "false");
+    if (restoreFocus !== false && settingsReturnFocus && typeof settingsReturnFocus.focus === "function") {
+      try { settingsReturnFocus.focus(); } catch (err) { /* ignore */ }
+    }
+    settingsReturnFocus = null;
+  }
+
+  function setToolsMenu(open, restoreFocus) {
+    var menu = $("toolsMenu");
+    menu.classList.toggle("hidden", !open);
+    $("btnTools").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      $("toolAttach").focus();
+    } else if (restoreFocus) {
+      try { $("btnTools").focus(); } catch (err) { /* ignore */ }
     }
   }
 
@@ -2249,7 +2339,11 @@
     state.readRounds = 0;
     if (!state.connected) {
       var status = await checkStatus();
-      if (!status || !status.connected) return;
+      if (!status || !status.connected) {
+        banner("Not connected to OpenCode — start it, then try again.", "err");
+        openSettings("connectionSection");
+        return;
+      }
     }
     var requestedRanges, requestedTraces, searchResults, commentResults;
     try {
@@ -2447,7 +2541,7 @@
     }
     var entry = QUICK[action];
     if (!entry) return;
-    $("settingsPanel").classList.add("hidden");
+    closeSettings(false);
     var input = $("input");
     var typed = input.value.trim();
     input.value = entry.text + (typed ? "\n\n" + typed : "");
@@ -2770,12 +2864,41 @@
 
   /* ------------------------------------------------------------------- init */
 
+  function requestPreferredPaneWidth() {
+    try {
+      var requirements = typeof Office !== "undefined" && Office.context && Office.context.requirements;
+      var supported = requirements && typeof requirements.isSetSupported === "function" &&
+        requirements.isSetSupported("TaskPaneApi", "1.1");
+      if (!supported || !Office.context.ui || !Office.TaskPane || typeof Office.TaskPane.setWidth !== "function") return;
+      var result = Office.TaskPane.setWidth(360);
+      if (result && typeof result.catch === "function") result.catch(function () { /* host may ignore width requests */ });
+    } catch (err) {
+      /* Width is a preference only; 270px remains fully supported. */
+    }
+  }
+
   function suggestionsHtml() {
+    var sheets = state.context && state.context.sheets || [];
+    var names = sheets.slice(0, 2).map(function (sheet) { return sheet.name; });
+    var more = sheets.length > 2 ? ", +" + (sheets.length - 2) + " tabs" : "";
+    var workbookLine = names.length
+      ? "I can see " + names.join(", ") + more + ". Try a task below or ask about a specific cell."
+      : "I can inspect formulas, explain data, and prepare reviewable changes.";
     return '<div class="empty" id="emptyState">' +
-      '<div class="suggested-title">Suggested</div>' +
-      '<button class="chip suggestion" data-action="budget"><span>↳</span> Build a personal budget</button>' +
-      '<button class="chip suggestion" data-action="debt"><span>↳</span> Build a debt payoff planner</button>' +
-      '<button class="chip suggestion" data-action="dashboard"><span>↳</span> Build a personal finance dashboard</button>' +
+      '<div class="empty-card">' +
+      '<div class="suggested-title">Work with this workbook</div>' +
+      '<p class="empty-copy">' + escapeHtml(workbookLine) + '</p>' +
+      '<div class="empty-actions">' +
+      '<button class="chip suggestion" data-action="format">Format sheet</button>' +
+      '<button class="chip suggestion" data-action="explain">Explain my formulas</button>' +
+      '<button class="chip suggestion" data-action="audit">Audit workbook</button>' +
+      '</div>' +
+      '<div class="syntax-example"><code>@range(Sheet1!A1:B10)</code> · <code>@trace(Sheet1!A1)</code> · <code>/</code> commands</div>' +
+      '<details class="templates"><summary>Templates</summary><div class="empty-actions">' +
+      '<button class="chip suggestion" data-action="budget">Personal budget</button>' +
+      '<button class="chip suggestion" data-action="debt">Debt payoff planner</button>' +
+      '<button class="chip suggestion" data-action="dashboard">Finance dashboard</button>' +
+      '</div></details></div>' +
       '</div>';
   }
 
@@ -2794,11 +2917,42 @@
     $("btnSend").addEventListener("click", send);
     $("btnStop").addEventListener("click", stop);
     $("btnNewChat").addEventListener("click", function () { newChat(); });
-    $("btnNewSession").addEventListener("click", function () { newChat(); });
     $("btnPrepareBackup").addEventListener("click", prepareBackup);
     $("btnRefreshContext").addEventListener("click", refreshContext);
     $("btnSettings").addEventListener("click", function () {
-      $("settingsPanel").classList.toggle("hidden");
+      if ($("settingsPanel").classList.contains("hidden")) openSettings();
+      else closeSettings();
+    });
+    $("btnCloseSettings").addEventListener("click", closeSettings);
+    $("connectionStatus").addEventListener("click", function () {
+      openSettings("connectionSection");
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key !== "Escape") return;
+      if (!$("settingsPanel").classList.contains("hidden")) {
+        event.preventDefault();
+        closeSettings();
+      } else if (!$("toolsMenu").classList.contains("hidden")) {
+        event.preventDefault();
+        setToolsMenu(false, true);
+      }
+    });
+    $("btnDismissBanner").addEventListener("click", dismissBanner);
+    $("settingsPanel").addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSettings();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      var focusable = settingsFocusable();
+      if (!focusable.length) return;
+      var first = focusable[0], last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault(); first.focus();
+      }
     });
     $("modelSelect").addEventListener("change", rememberModel);
     $("chkReadOnly").addEventListener("change", function () {
@@ -2850,7 +3004,7 @@
           renderCommandMenu($("input").value.split(/\s+/)[0]);
           return;
         }
-        if (event.key === "Tab" || (event.key === "Enter" && !event.ctrlKey && !event.metaKey)) {
+        if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey)) {
           event.preventDefault();
           chooseCommand(state.commandMatches[state.commandIndex]);
           return;
@@ -2861,7 +3015,7 @@
           return;
         }
       }
-      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
         send();
       }
@@ -2874,8 +3028,37 @@
       attachFiles(event.target.files || []);
       event.target.value = "";
     });
-    $("btnAttach").addEventListener("click", function () { $("fileInput").click(); });
-    $("btnAttachTop").addEventListener("click", function () { $("fileInput").click(); });
+    $("btnTools").addEventListener("click", function (event) {
+      event.stopPropagation();
+      setToolsMenu($("toolsMenu").classList.contains("hidden"));
+    });
+    $("toolsMenu").addEventListener("keydown", function (event) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setToolsMenu(false, true);
+        return;
+      }
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      var items = Array.prototype.slice.call($("toolsMenu").querySelectorAll("button"));
+      var at = items.indexOf(document.activeElement);
+      if (at < 0) return;
+      event.preventDefault();
+      items[(at + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length].focus();
+    });
+    $("toolAttach").addEventListener("click", function () {
+      setToolsMenu(false);
+      $("fileInput").click();
+    });
+    $("toolShortcuts").addEventListener("click", function () {
+      setToolsMenu(false, true);
+      openSettings();
+      var firstShortcut = $("quickActions").querySelector("button");
+      if (firstShortcut) setTimeout(function () { firstShortcut.focus(); firstShortcut.scrollIntoView({ block: "nearest" }); }, 0);
+    });
+    $("toolNewChat").addEventListener("click", function () {
+      setToolsMenu(false);
+      newChat();
+    });
     $("btnClearAttachments").addEventListener("click", function () {
       clearAttachments();
     });
@@ -2885,9 +3068,12 @@
       for (var i = 0; i < boxes.length; i++) {
         if (!boxes[i].disabled) boxes[i].checked = $("previewSelectAll").checked;
       }
-      $("previewSelectAll").indeterminate = false;
+      updatePlanSelection();
     });
     $("btnCancelPlan").addEventListener("click", hidePreview);
+    $("previewMore").addEventListener("click", function (event) {
+      if (event.target.closest("button, a")) $("previewMore").open = false;
+    });
     $("btnShowPlanJson").addEventListener("click", function () {
       var details = $("planDetails");
       var hidden = details.classList.contains("hidden");
@@ -2917,14 +3103,18 @@
     });
     if ($("btnSessionHistory")) {
       $("btnSessionHistory").addEventListener("click", function () {
-        $("settingsPanel").classList.add("hidden");
+        closeSettings(false);
         showSessionList();
       });
     }
     document.addEventListener("click", function (event) {
       var panel = $("settingsPanel");
       if (!panel.classList.contains("hidden") && !panel.contains(event.target) && !$("btnSettings").contains(event.target)) {
-        panel.classList.add("hidden");
+        closeSettings(false);
+      }
+      var tools = $("toolsMenu");
+      if (!tools.classList.contains("hidden") && !tools.contains(event.target) && !$("btnTools").contains(event.target)) {
+        setToolsMenu(false);
       }
     });
     wireQuickActions(document);
@@ -2933,6 +3123,7 @@
   async function init() {
     loadSettings();
     wire();
+    requestPreferredPaneWidth();
     $("chkReadOnly").checked = state.readOnly;
     $("selApproval").value = state.approvalMode;
     $("btnApplyPlan").disabled = state.readOnly;
