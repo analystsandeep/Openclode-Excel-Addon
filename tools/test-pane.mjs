@@ -206,7 +206,7 @@ function createFakeExcel() {
 
   const Excel = {
     run: async (fn) => fn(ctx),
-    InsertShift: { down: "down", right: "right" },
+    InsertShiftDirection: { down: "Down", right: "Right" },
     DeleteShiftDirection: { up: "up", left: "left" },
   };
 

@@ -127,6 +127,8 @@
           return cell.trim();
         });
         if (cells.length < 2) continue;
+        // Skip markdown alignment rows such as |---|:--:|--:|.
+        if (cells.every(function (cell) { return /^:?-{2,}:?$/.test(cell); })) continue;
         if (!rows.length || rows[0].length === cells.length) rows.push(cells);
       }
       if (rows.length >= 2) return rows; // header + at least one data row
@@ -148,23 +150,25 @@
     return candidates.length === 1 ? candidates[0] : null;
   }
 
-  /** Cell one row below a range address like "Sheet1!A1:D20" (with a blank spacer row). */
+  /** Cell one row below a range address like "Sheet1!A1:D20" (with a blank spacer row).
+      Accepts $-absolute refs and whole-row refs; a row-only ref lands in column A. */
   function belowAddress(address) {
     if (!address) return null;
-    var ref = String(address).split("!").pop();
-    var match = ref.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
-    if (!match) return null;
-    var col = match[1];
-    var lastRow = Number(match[4] || match[2]);
+    var ref = String(address).split("!").pop().replace(/\$/g, "").trim();
+    var match = ref.match(/^([A-Z]+)?(\d+)(?::(?:[A-Z]+)?(\d+))?$/i);
+    if (!match) return null; // whole-column refs have no row to go below
+    var col = match[1] || "A";
+    var lastRow = Number(match[3] || match[2]);
     return col + (lastRow + 2);
   }
 
-  /** Top-left cell of a range address like "Sheet1!A1:D20". */
+  /** Top-left cell of a range address like "Sheet1!A1:D20" ($- and row-only tolerant). */
   function startAddress(address) {
     if (!address) return null;
-    var ref = String(address).split("!").pop();
-    var match = ref.match(/^([A-Z]+)(\d+)/i);
-    return match ? match[1] + match[2] : null;
+    var ref = String(address).split("!").pop().replace(/\$/g, "").trim();
+    var match = ref.match(/^([A-Z]+)?(\d+)/i);
+    if (!match) return null;
+    return (match[1] || "A") + match[2];
   }
 
   /* --------------------------------------------------------- sheet formatter */
@@ -515,7 +519,7 @@
               if (!refs.length) continue;
               state.formulaCells.push({
                 sheet: entry.sheet.name,
-                address: columnName(entry.range.columnIndex + c) + (entry.range.rowIndex + r + 1),
+                address: colName(entry.range.columnIndex + c) + (entry.range.rowIndex + r + 1),
                 formula: formula,
                 refs: refs,
               });

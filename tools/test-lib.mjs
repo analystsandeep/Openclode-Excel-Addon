@@ -150,7 +150,7 @@ check("explicit range rejects >500 cells", rangeRejected("@range(S!A1:A501)"), t
 check("explicit range rejects worksheet overflow", rangeRejected("@range(S!XFE1)"), true);
 check("explicit range rejects 4 requests", rangeRejected("@range(S!A1) @range(S!A2) @range(S!A3) @range(S!A4)"), true);
 const structuralCalls = [];
-const structuralExcel = { InsertShift: {down:"Down",right:"Right"}, DeleteShiftDirection: {up:"Up",left:"Left"}, run: async function(fn) {
+const structuralExcel = { InsertShiftDirection: {down:"Down",right:"Right"}, DeleteShiftDirection: {up:"Up",left:"Left"}, run: async function(fn) {
   return fn({workbook:{worksheets:{getItem:()=>({getRange: address => ({insert: direction => structuralCalls.push([address,direction]),delete:direction=>structuralCalls.push([address,direction])})})}},sync:async()=>{}});
 }};
 await plan.applyOps(structuralExcel,[plan.normalizeOp({op:"insertRows",sheet:"S",range:"A5",count:3}),plan.normalizeOp({op:"deleteColumns",sheet:"S",range:"B2",count:2})]);
@@ -159,7 +159,7 @@ check("structural execution uses whole ranges",structuralCalls,[["5:7","Down"],[
 // Chart API argument order must match Excel.ChartCollection.add(type, sourceData, seriesBy).
 const chartCalls = [];
 const oldGlobalExcel = globalThis.Excel;
-globalThis.Excel = {ChartType:{ColumnClustered:"ColumnClustered"}, ChartSeriesBy:{columns:"Columns"}};
+globalThis.Excel = {ChartType:{columnClustered:"ColumnClustered"}, ChartSeriesBy:{columns:"Columns"}};
 // plan is loaded in its own sandbox; expose the Excel enum there via a fresh load.
 const chartSandbox = {Excel: globalThis.Excel};
 new Function("globalThis", "window", "module", "Excel", planSrc)(chartSandbox, chartSandbox, undefined, globalThis.Excel);
@@ -690,12 +690,12 @@ var structuralExcelDeferred = {
       sync: async function () {},
     });
   },
-  InsertShift: { down: "down", right: "right" },
+  InsertShiftDirection: { down: "Down", right: "Right" },
   DeleteShiftDirection: { up: "up", left: "left" },
 };
 const rowApply = plan.normalizeOp({ op: "insertRows", sheet: "Sheet1", range: "A5", count: 3 });
 await plan.applyOps(structuralExcelDeferred, [rowApply]);
-check("row executor targets whole rows", structuralCallsDeferred[0], ["insert", "5:7", "down"]);
+check("row executor targets whole rows", structuralCallsDeferred[0], ["insert", "5:7", "Down"]);
 const colApply = plan.normalizeOp({ op: "deleteColumns", sheet: "Sheet1", range: "C3", count: 2 });
 await plan.applyOps(structuralExcelDeferred, [colApply]);
 check("column executor targets whole columns", structuralCallsDeferred[1], ["delete", "C:D", "left"]);
@@ -720,7 +720,7 @@ var deferredChartExcel = {
   },
 };
 var realExcel = globalThis.Excel;
-globalThis.Excel = { ChartType: { ColumnClustered: "ColumnClustered" }, ChartSeriesBy: { columns: "Columns" } };
+globalThis.Excel = { ChartType: { columnClustered: "ColumnClustered" }, ChartSeriesBy: { columns: "Columns" } };
 const deferredChartOp = plan.normalizeOp({ op: "addChart", sheet: "Sheet1", chartType: "ColumnClustered", source: "A1:B5", name: "Chart 1" });
 const chartResults = await plan.applyOps(deferredChartExcel, [deferredChartOp]);
 globalThis.Excel = realExcel;

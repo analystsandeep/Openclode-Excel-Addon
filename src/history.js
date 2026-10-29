@@ -62,7 +62,12 @@
         var result;
         try { result = fn(store); }
         catch (err) { reject(err); return; }
-        tx.oncomplete = function () { resolve(result && result.result !== undefined ? result.result : result); };
+        tx.oncomplete = function () {
+          // A missing IndexedDB key leaves IDBRequest.result undefined. Detect
+          // the request by property presence so callers do not receive it as a
+          // truthy ghost record and skip the in-memory fallback.
+          resolve(result && typeof result === "object" && "result" in result ? result.result : result);
+        };
         tx.onerror = function () { reject(tx.error || new Error("History transaction failed")); };
         tx.onabort = function () { reject(tx.error || new Error("History transaction aborted")); };
       });

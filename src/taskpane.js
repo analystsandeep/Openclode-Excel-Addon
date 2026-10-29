@@ -231,7 +231,8 @@
     var text = $("statusText");
     var dot = '<span class="dot ' + (status.connected ? "ok" : "err") + '"></span>';
     if (status.connected) {
-      text.innerHTML = dot + "OpenCode " + (status.version ? "v" + status.version : "connected");
+      var label = "OpenCode " + (status.version ? "v" + escapeHtml(String(status.version)) : "connected");
+      text.innerHTML = dot + label;
     } else {
       text.innerHTML = dot + "Not connected";
       if (status.hint) banner(status.hint, "err");
@@ -652,7 +653,15 @@
   }
 
   function handleEvent(evt) {
-    if (!state.bubble) return;
+    if (!state.bubble) {
+      // Surface an authoritative answer that arrives after the local guard has
+      // already finalized the partial response.
+      if ((evt.type === "done" || evt.type === "text") && evt.text && state.sessionID) {
+        addMessage("assistant", renderMarkdown(evt.text), { text: evt.text });
+        scroll();
+      }
+      return;
+    }
     if (evt.type === "delta") {
       state.answer += evt.delta || "";
       state.bubble.textContent = state.answer;
@@ -902,7 +911,11 @@
       state.streaming = true; $("btnSend").disabled = true;
       try {
         var results = await readRequestedRanges(request.tokens);
-        if (state.pendingRead !== pending || state.sessionID !== pending.sessionID) return;
+        if (state.pendingRead !== pending || state.sessionID !== pending.sessionID) {
+          state.streaming = false;
+          $("btnSend").disabled = false;
+          return;
+        }
         state.readRounds++;
         state.pendingRead = null;
         beginAssistant();
@@ -1880,7 +1893,7 @@
         break;
       }
       if (file.size > MAX_ATTACHMENT_BYTES) {
-        banner("File too large: " + escapeHtml(file.name) + " (max 25 MB).", "warn");
+        banner("File too large: " + file.name + " (max 25 MB).", "warn");
         continue;
       }
       var entry = { id: "att_" + Date.now() + "_" + i, uploadID: null, uri: null, name: file.name, type: file.type || "application/octet-stream", size: file.size, text: null };
@@ -1915,11 +1928,11 @@
     state.attachments.forEach(function (a) {
       var chip = document.createElement("span");
       chip.className = "attach-chip";
-      chip.textContent = escapeHtml(a.name) + " (" + Math.round(a.size / 1024) + " KB)";
+      chip.textContent = a.name + " (" + Math.round(a.size / 1024) + " KB)";
       var rm = document.createElement("button");
       rm.className = "remove";
       rm.textContent = "✕";
-      rm.setAttribute("aria-label", "Remove " + escapeHtml(a.name));
+      rm.setAttribute("aria-label", "Remove " + a.name);
       rm.addEventListener("click", function () { removeAttachment(a.id); });
       chip.appendChild(rm);
       container.appendChild(chip);
@@ -1948,13 +1961,14 @@
       body: JSON.stringify(request),
     });
     clearTimeout(state.doneTimer);
+    // This local guard must outlive the bridge's 10-minute turn timeout.
     state.doneTimer = setTimeout(function () {
       if (state.streaming) {
         if (startFreeModelFallback(state.answer, state.lastError)) return;
         banner("No completion event arrived - showing what was received so far.", "warn");
         finalize(state.answer);
       }
-    }, 180000);
+    }, 11 * 60 * 1000);
   }
 
   // User explicitly authorizes each read by naming @range(Sheet!A1:B10).
@@ -2591,7 +2605,7 @@
     var entries = (log && log.entries) || [];
     var lines = entries.map(function (e) {
       var when = "";
-      try { when = new Date(e.at).toLocaleTimeString(); } catch {} return when + "  " + e.type + "  " + escapeHtml(JSON.stringify(e.payload || {}).slice(0, 200));
+      try { when = new Date(e.at).toLocaleTimeString(); } catch {} return when + "  " + e.type + "  " + JSON.stringify(e.payload || {}).slice(0, 200);
     });
     el.textContent = lines.length ? lines.join("\n") : "(no audit entries yet)";
     el.classList.remove("hidden");

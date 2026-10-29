@@ -62,6 +62,7 @@ function parseRef(ref) {
 function createFakeExcel(options = {}) {
   const ops = [];
   let cfCount = 0;
+  const dataBarFormats = [];
   const grid = (options.grid || []).map((row) => row.slice());
   const tableItems = [];
 
@@ -271,7 +272,9 @@ function createFakeExcel(options = {}) {
           cfCount++;
           ops.push({ kind: "cf.add", a1, type });
           if (type === "DataBar") {
-            return { dataBar: { barColor: "", showValue: false } };
+            // Model the GA ExcelApi 1.6+ surface, not the legacy preview API.
+            dataBarFormats.push({ positiveFormat: {}, showDataBarOnly: false });
+            return { dataBar: dataBarFormats[dataBarFormats.length - 1] };
           }
           return { custom: { rule: { formula: "" }, format: { fill: { color: "" }, font: { color: "" } } } };
         },
@@ -337,7 +340,7 @@ function createFakeExcel(options = {}) {
     return table;
   }
 
-  return { Excel, ops, grid, sheet, tableItems, addTable };
+  return { Excel, ops, grid, sheet, tableItems, addTable, dataBarFormats };
 }
 
 /* --------------------------------------------------------------- load code -- */
@@ -418,6 +421,8 @@ async function main() {
   check("narrow left margin", fake.ops.find((op) => op.kind === "setPrintMargins").margins.left, 0.25);
   check("fits to one page wide", fake.sheet.pageLayout.zoom, { horizontalFitToPages: 1, verticalFitToPages: null });
   check("adds exactly two conditional formats", fake.ops.filter((op) => op.kind === "cf.add").length, 2);
+  check("data bar fills via positiveFormat.fillColor", fake.dataBarFormats[0] && fake.dataBarFormats[0].positiveFormat.fillColor, "#5B9BD5");
+  check("data bar leaves legacy preview barColor untouched", "barColor" in (fake.dataBarFormats[0] || {}), false);
   check("data bar on the amount column", fake.ops.filter((op) => op.kind === "cf.add" && op.type === "DataBar")[0].a1, "H5:H16");
   check("merges the summary title on a first run", fake.ops.filter((op) => op.kind === "merge").length, 1);
   ok(

@@ -28,14 +28,15 @@
     "sideload": "npx --yes office-addin-dev-settings sideload manifest.xml",
     "unsideload": "npx --yes office-addin-dev-settings unsideload manifest.xml",
     "validate": "npx --yes office-addin-manifest validate manifest.xml",
-    "test": "node tools/test-lib.mjs && node tools/test-format.mjs && node tools/test-health.mjs && node tools/test-starter.mjs && node tools/test-bridge.mjs && node tools/test-pane.mjs",
+    "test": "node tools/test-lib.mjs && node tools/test-format.mjs && node tools/test-health.mjs && node tools/test-starter.mjs && node tools/test-bridge.mjs && node tools/test-pane.mjs && node tools/test-regress.mjs",
     "test:unit": "node tools/test-lib.mjs",
     "test:format": "node tools/test-format.mjs",
     "test:bridge": "node tools/test-bridge.mjs",
     "test:pane": "node tools/test-pane.mjs",
     "test:e2e": "bash tools/smoke-test.sh",
     "test:health": "node tools/test-health.mjs",
-    "test:starter": "node tools/test-starter.mjs"
+    "test:starter": "node tools/test-starter.mjs",
+    "test:regress": "node tools/test-regress.mjs"
   },
   "engines": {
     "node": ">=18"

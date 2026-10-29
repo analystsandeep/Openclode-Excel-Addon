@@ -675,12 +675,13 @@ function sessionOfEvent(evt) {
 function startUpstreamStream(sessionID, turn) {
   let stopped = false;
   let attempt = 0;
+  let controller = null; // active upstream fetch; aborted on stop()
 
   const run = async () => {
     while (!stopped && !turn.cancelled) {
       try {
         const path = EVENT_PATHS[eventPathIndex];
-        const controller = new AbortController();
+        controller = new AbortController();
         const streamTimer = setTimeout(() => controller.abort(), 5 * 60 * 1000);
         const res = await fetch(ocUrl(path), {
           headers: { ...authHeaders(service.password), accept: "text/event-stream" },
@@ -772,6 +773,9 @@ function startUpstreamStream(sessionID, turn) {
   return {
     stop() {
       stopped = true;
+      // Abort the in-flight fetch so a hung reader.read() (silent upstream)
+      // releases the OpenCode connection when the pane goes away.
+      try { controller?.abort(); } catch { /* already done */ }
     },
   };
 }

@@ -739,6 +739,13 @@
     }
   }
 
+  // Range.insert expects Excel.InsertShiftDirection ("Down"/"Right"). Use
+  // documented string values as a fallback for hosts without the enum object.
+  function insertShift(Excel, direction) {
+    var values = Excel && Excel.InsertShiftDirection;
+    return (values && values[direction]) || (direction === "down" ? "Down" : "Right");
+  }
+
   function excelEnum(Excel, group, member) {
     var values = Excel && Excel[group];
     if (!values || member == null) return member;
@@ -899,12 +906,11 @@
 
   function addChartOp(sheet, op) {
     var typeName = op.chartType || "ColumnClustered";
-    var ChartType = (typeof Excel !== "undefined" && Excel.ChartType) || {};
-    var chartType = ChartType[typeName];
+    var ns = typeof Excel !== "undefined" ? Excel : null;
+    var chartType = excelEnum(ns, "ChartType", typeName);
     if (!chartType) throw new Error("Unsupported chart type '" + typeName + "' (charts need ExcelApi 1.8+)");
     var source = sheet.getRange(op.source || op.range);
-    var SeriesBy = (typeof Excel !== "undefined" && Excel.ChartSeriesBy) || {};
-    var seriesBy = SeriesBy.columns;
+    var seriesBy = excelEnum(ns, "ChartSeriesBy", "columns") || "Columns";
     // Microsoft documents ChartCollection.add(type, sourceData, seriesBy).
     // Do not fall back after a deferred sync error: by then the chart may
     // already exist, and a second add could create a duplicate.
@@ -1161,13 +1167,13 @@
               s.getRange(op.range).clear(op.applyTo || "All");
               break;
             case "insertRows":
-              s.getRange(op.range).insert(Excel.InsertShift.down);
+              s.getRange(op.range).insert(insertShift(Excel, "down"));
               break;
             case "deleteRows":
               s.getRange(op.range).delete(Excel.DeleteShiftDirection.up);
               break;
             case "insertColumns":
-              s.getRange(op.range).insert(Excel.InsertShift.right);
+              s.getRange(op.range).insert(insertShift(Excel, "right"));
               break;
             case "deleteColumns":
               s.getRange(op.range).delete(Excel.DeleteShiftDirection.left);

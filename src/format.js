@@ -50,6 +50,7 @@
     if (dm) decimals = Number(dm[1]);
 
     var symbol = null;
+    var genericCode = null;
     var code = lower.match(/\b(usd|eur|gbp|jpy|chf|cad|aud)\b/);
     if (code) {
       symbol = { usd: "$", eur: "€", gbp: "£", jpy: "¥", chf: "CHF ", cad: "C$", aud: "A$" }[code[1]];
@@ -63,7 +64,11 @@
       var symbolMatch = src.match(/currency\s*(?:symbol)?\s*[:=]\s*([^\s,;]+)/i);
       if (symbolMatch) {
         var token = symbolMatch[1].replace(/^["']|["']$/g, "");
-        if (token && token.length <= 4 && !/^[a-z]{3}$/i.test(token)) symbol = token;
+        if (token && /^[a-z]{3}$/i.test(token)) {
+          genericCode = token.toUpperCase();
+        } else if (token && token.length <= 4) {
+          symbol = token;
+        }
       }
     }
 
@@ -75,7 +80,9 @@
       }
     }
     if (!explicit || out.currency === CURRENCY) {
-      var sym = symbol || "$";
+      // Preserve requested ISO codes that do not have a symbol mapping instead
+      // of silently formatting those amounts as US dollars.
+      var sym = symbol || (genericCode ? '"' + genericCode + '" ' : "$");
       var places = currencyDecimals != null ? currencyDecimals : (decimals != null ? decimals : 0);
       var positive = sym + "#,##0" + (places > 0 ? "." + repeatZero(places) : "");
       var negative;
@@ -601,8 +608,13 @@
         var amountBody = sheet.getRange(amountLetter + (info.headerRow + 1) + ":" + amountLetter + info.lastRow);
 
         var bar = amountBody.conditionalFormats.add("DataBar");
-        bar.dataBar.barColor = COLORS.barBlue;
-        bar.dataBar.showValue = true;
+        if (bar.dataBar.positiveFormat) {
+          // ExcelApi 1.6+: cell values remain visible by default.
+          bar.dataBar.positiveFormat.fillColor = COLORS.barBlue;
+        } else if ("barColor" in bar.dataBar) {
+          // Legacy ExcelApi 1.2 preview hosts only.
+          bar.dataBar.barColor = COLORS.barBlue;
+        }
 
         var custom = body.conditionalFormats.add("Custom");
         custom.custom.rule.formula =
